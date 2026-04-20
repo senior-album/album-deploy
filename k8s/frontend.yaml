@@ -15,8 +15,8 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: senior-album-frontend:latest
-          imagePullPolicy: Never  # k3d 로컬 이미지 사용
+          image: ghcr.io/senior-album/album-frontend:latest
+          imagePullPolicy: Always
           ports:
             - containerPort: 80
           resources:
