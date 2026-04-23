@@ -17,7 +17,7 @@ spec:
         - name: ghcr-secret
       containers:
         - name: frontend
-          image: ghcr.io/senior-album/album-frontend:631738c
+          image: ghcr.io/senior-album/album-frontend:9376b62
           imagePullPolicy: Always
           ports:
             - containerPort: 80
