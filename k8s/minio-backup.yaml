@@ -1,0 +1,92 @@
+---
+# T-044: 일 1회 MinIO → Cloudflare R2 백업.
+#
+# 스케줄: 매일 17:30 UTC (= 02:30 KST). 사진 업로드가 거의 없는 새벽 시간대.
+#
+# 동작: `mc mirror` 로 `senior-album-photos` 버킷을 R2 로 복제한다.
+# `--remove` 는 의도적으로 붙이지 않는다 — source 가 손상 / 랜섬 당했을 때
+# target 까지 지우는 anti-pattern 회피. R2 측 retention 은 R2 lifecycle
+# 규칙으로 별도 관리 (후속 티켓: T-182 보관기간 정책).
+#
+# 의존성: `backup-secret` SealedSecret 이 같은 네임스페이스에 존재해야 한다.
+# 키: R2_ENDPOINT (e.g. https://<account>.r2.cloudflarestorage.com),
+#     R2_ACCESS_KEY, R2_SECRET_KEY, R2_BUCKET.
+# 미설정 상태에서 CronJob 은 매 실행마다 실패한다 — 아직 R2 계정을 파지
+# 않았다면 CronJob 자체를 주석 처리하거나 suspend: true 로 두고 적용.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: minio-backup
+  namespace: senior-album
+  labels:
+    app: minio-backup
+spec:
+  schedule: "30 17 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  startingDeadlineSeconds: 3600
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 7200  # 2h 안에 못 끝내면 abort — 다음 스케줄에 재시도.
+      template:
+        metadata:
+          labels:
+            app: minio-backup
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: mc
+              image: minio/mc:latest  # 기존 minio-init Job 과 정책 맞춤. 추후 digest pin (T-053 후속).
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -euo pipefail
+                  echo "[backup] start $(date -u +%FT%TZ)"
+                  mc alias set src http://minio:9000 "$SRC_ACCESS_KEY" "$SRC_SECRET_KEY"
+                  mc alias set r2 "$R2_ENDPOINT" "$R2_ACCESS_KEY" "$R2_SECRET_KEY"
+                  # 버킷이 없으면 생성. 이미 있어도 에러 내지 않음.
+                  mc mb --ignore-existing "r2/$R2_BUCKET"
+                  # --remove 미사용: source 오염이 target 에 전파되는 걸 차단.
+                  mc mirror --overwrite "src/senior-album-photos" "r2/$R2_BUCKET"
+                  echo "[backup] done $(date -u +%FT%TZ)"
+              env:
+                - name: SRC_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: backend-secret
+                      key: MINIO_ACCESS_KEY
+                - name: SRC_SECRET_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: backend-secret
+                      key: MINIO_SECRET_KEY
+                - name: R2_ENDPOINT
+                  valueFrom:
+                    secretKeyRef:
+                      name: backup-secret
+                      key: R2_ENDPOINT
+                - name: R2_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: backup-secret
+                      key: R2_ACCESS_KEY
+                - name: R2_SECRET_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: backup-secret
+                      key: R2_SECRET_KEY
+                - name: R2_BUCKET
+                  valueFrom:
+                    secretKeyRef:
+                      name: backup-secret
+                      key: R2_BUCKET
+              resources:
+                requests:
+                  memory: "128Mi"
+                  cpu: "100m"
+                limits:
+                  memory: "512Mi"
+                  cpu: "500m"
