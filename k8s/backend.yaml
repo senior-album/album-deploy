@@ -19,6 +19,9 @@ spec:
         - name: backend
           image: ghcr.io/senior-album/album-backend:ee94208
           imagePullPolicy: Always
+          env:
+            - name: NO_ALBUMENTATIONS_UPDATE
+              value: "1"
           ports:
             - containerPort: 8000
           envFrom:
@@ -48,6 +51,7 @@ spec:
               port: 8000
             initialDelaySeconds: 30
             periodSeconds: 30
+
       volumes:
         - name: uploads
           emptyDir: {}
