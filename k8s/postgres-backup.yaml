@@ -1,0 +1,130 @@
+---
+# T-043: 일 1회 PostgreSQL pg_dump → Cloudflare R2 업로드.
+#
+# 스케줄: 매일 18:00 UTC (= 03:00 KST). T-044(MinIO 백업) 은 17:30 UTC 라
+# 30분 차이를 둔다 — 같은 시간대에 R2 업로드가 겹쳐 대역폭 쏠리는 걸 피함.
+#
+# 동작:
+#   pg_dump --no-owner --no-privileges -Fc -d senior_album |
+#     mc pipe r2/$R2_BUCKET/postgres/senior_album_<TS>.dump
+#
+# -Fc (custom format): 압축 내장 + 선택적 복원(pg_restore -L)이 가능.
+# --no-owner / --no-privileges: 복원 시 role/ACL 재현 안 함 — 복원 대상
+# 환경의 role 에 맡김.
+#
+# 보관: 14일 이상 된 덤프는 스크립트 말미에서 삭제. R2 라이프사이클 규칙이
+# 있으면 거기서 관리해도 무방.
+#
+# 의존성: `backup-secret` SealedSecret (T-044 에서 이미 도입) — R2 크레덴셜.
+#         `backend-secret` — POSTGRES_PASSWORD 공유.
+#
+# 아키텍처: k3d 노드가 arm64/amd64 어느 쪽이든 동작하도록 mc 바이너리를
+# uname -m 기반 런타임 다운로드. insightface 백엔드 이미지와 달리 여긴 정적
+# 바이너리라 크기 부담 없음 (~30MB). 첫 실행 시 네트워크 의존하지만 이후
+# CronJob 은 매번 새 파드라 매번 받는다 — 상시 캐시가 필요하면 initContainer
+# 로 분리하는 후속 PR 에서.
+#
+# DB 접속 파라미터:
+#   PGHOST=postgres (서비스명), PGPORT=5432, PGUSER=postgres, PGDATABASE=senior_album.
+#   이 네 개는 현재 ConfigMap 의 DATABASE_URL 에 하드코드된 값과 일치 —
+#   user/pass 를 SealedSecret 으로 분리하는 T-003 선행 작업(#87 postgres 구조
+#   변경) 이 머지되면 그때 여기 env 도 같이 갱신.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: postgres-backup
+  namespace: senior-album
+  labels:
+    app: postgres-backup
+spec:
+  schedule: "0 18 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  startingDeadlineSeconds: 3600
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 3600  # 1h 안에 못 끝내면 abort.
+      template:
+        metadata:
+          labels:
+            app: postgres-backup
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: dump
+              image: postgres:15-alpine
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -euo pipefail
+
+                  TS=$(date -u +%Y%m%dT%H%M%SZ)
+                  KEY="postgres/senior_album_${TS}.dump"
+                  echo "[backup] start ${TS} → r2/${R2_BUCKET}/${KEY}"
+
+                  # mc 바이너리 런타임 다운로드 (arch 감지)
+                  ARCH=$(uname -m)
+                  case "$ARCH" in
+                    x86_64) MC_ARCH=amd64 ;;
+                    aarch64|arm64) MC_ARCH=arm64 ;;
+                    *) echo "[backup] unsupported arch: $ARCH" >&2; exit 1 ;;
+                  esac
+                  wget -qO /usr/local/bin/mc "https://dl.min.io/client/mc/release/linux-${MC_ARCH}/mc"
+                  chmod +x /usr/local/bin/mc
+
+                  mc alias set r2 "$R2_ENDPOINT" "$R2_ACCESS_KEY" "$R2_SECRET_KEY" >/dev/null
+                  mc mb --ignore-existing "r2/$R2_BUCKET" >/dev/null
+
+                  # dump → R2 stream (디스크 임시 파일 없음)
+                  pg_dump --no-owner --no-privileges -Fc \
+                    -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" | \
+                    mc pipe "r2/$R2_BUCKET/$KEY"
+
+                  # 14일보다 오래된 덤프 정리
+                  mc rm --recursive --force --older-than 14d "r2/$R2_BUCKET/postgres/" || true
+
+                  echo "[backup] done $(date -u +%FT%TZ)"
+              env:
+                - name: PGHOST
+                  value: "postgres"
+                - name: PGPORT
+                  value: "5432"
+                - name: PGUSER
+                  value: "postgres"
+                - name: PGDATABASE
+                  value: "senior_album"
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: backend-secret
+                      key: POSTGRES_PASSWORD
+                - name: R2_ENDPOINT
+                  valueFrom:
+                    secretKeyRef:
+                      name: backup-secret
+                      key: R2_ENDPOINT
+                - name: R2_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: backup-secret
+                      key: R2_ACCESS_KEY
+                - name: R2_SECRET_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: backup-secret
+                      key: R2_SECRET_KEY
+                - name: R2_BUCKET
+                  valueFrom:
+                    secretKeyRef:
+                      name: backup-secret
+                      key: R2_BUCKET
+              resources:
+                requests:
+                  memory: "128Mi"
+                  cpu: "100m"
+                limits:
+                  memory: "512Mi"
+                  cpu: "500m"
