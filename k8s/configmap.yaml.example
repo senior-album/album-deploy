@@ -9,7 +9,12 @@ data:
   DEBUG: "False"
 
   # 데이터베이스 (k8s 서비스명 기준)
-  DATABASE_URL: "postgresql+asyncpg://postgres:postgres@postgres:5432/senior_album"
+  # roadmap#87: 비밀번호는 SealedSecret 의 POSTGRES_PASSWORD 에. 부분 env 만 ConfigMap.
+  # backend 가 런타임에 조립. (postgres-backup CronJob 도 동일 패턴)
+  POSTGRES_HOST: "postgres"
+  POSTGRES_PORT: "5432"
+  POSTGRES_USER: "postgres"
+  POSTGRES_DB: "senior_album"
 
   # Redis
   REDIS_URL: "redis://redis:6379/0"
