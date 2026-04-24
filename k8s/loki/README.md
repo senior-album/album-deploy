@@ -26,14 +26,14 @@ backend / frontend / postgres / minio / ... (stdout)
 # 1-1. mc 설치 (없으면)
 brew install minio-mc
 
-# 1-2. MinIO console 접근 (port-forward)
-kubectl -n senior-album port-forward svc/minio 9001:9001 &
+# 1-2. MinIO S3 API port-forward (mc 는 S3 API 포트 9000 을 사용. 9001 은 web console)
+kubectl -n senior-album port-forward svc/minio 9000:9000 &
 PF_PID=$!
 
 # 1-3. mc alias 등록 (admin credential)
 ADMIN_AK=$(kubectl -n senior-album get secret backend-secret -o jsonpath='{.data.MINIO_ACCESS_KEY}' | base64 -d)
 ADMIN_SK=$(kubectl -n senior-album get secret backend-secret -o jsonpath='{.data.MINIO_SECRET_KEY}' | base64 -d)
-mc alias set saminio http://localhost:9001 "$ADMIN_AK" "$ADMIN_SK"
+mc alias set saminio http://localhost:9000 "$ADMIN_AK" "$ADMIN_SK"
 
 # 1-4. loki 버킷 생성
 mc mb saminio/loki
