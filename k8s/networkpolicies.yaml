@@ -228,8 +228,9 @@ spec:
           port: 9200
 
 ---
-# minio: backend + minio-backup + minio-init + cloudflared 에서 :9000.
+# minio: backend + minio-backup + minio-init + cloudflared + loki 에서 :9000.
 #        cloudflared 는 storage.thekim123.info 서브도메인이 MinIO 로 직접 라우팅되는 구조라 필요.
+#        loki 는 chunks/index 를 MinIO 의 `loki` 버킷에 저장 (T-042).
 #        console (:9001) 은 기본 차단. 필요 시 port-forward 로만 접근.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -255,6 +256,9 @@ spec:
         - podSelector:
             matchLabels:
               app: cloudflared
+        - podSelector:
+            matchLabels:
+              app: loki
       ports:
         - protocol: TCP
           port: 9000
@@ -462,3 +466,101 @@ spec:
       ports:
         - protocol: TCP
           port: 9000
+
+---
+# T-042 — loki: alloy + grafana 에서 :3100 (push + query).
+#                egress: minio:9000 (chunks/index 저장).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: loki
+  namespace: senior-album
+spec:
+  podSelector:
+    matchLabels:
+      app: loki
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: alloy
+        - podSelector:
+            matchLabels:
+              app: grafana
+      ports:
+        - protocol: TCP
+          port: 3100
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: minio
+      ports:
+        - protocol: TCP
+          port: 9000
+
+---
+# T-042 — alloy DaemonSet: egress to loki:3100 + Kubernetes API (pod 디스커버리).
+#         ingress 없음 (외부에서 호출 안 함).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: alloy
+  namespace: senior-album
+spec:
+  podSelector:
+    matchLabels:
+      app: alloy
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: loki
+      ports:
+        - protocol: TCP
+          port: 3100
+    # Kubernetes API server (pod discovery). default-deny 로 차단되므로 명시.
+    # 클러스터 내부 ClusterIP 라 RFC1918 except 에 잡히지 않게 ipBlock 으로 풀어줌.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+
+---
+# T-042 — grafana: ingress from kube-system (port-forward) + cloudflared (외부 노출 시 후속).
+#                  egress: loki:3100 (쿼리).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: grafana
+  namespace: senior-album
+spec:
+  podSelector:
+    matchLabels:
+      app: grafana
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+        - podSelector:
+            matchLabels:
+              app: cloudflared
+      ports:
+        - protocol: TCP
+          port: 3000
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: loki
+      ports:
+        - protocol: TCP
+          port: 3100
