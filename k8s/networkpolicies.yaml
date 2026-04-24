@@ -1,0 +1,452 @@
+---
+# T-052: NetworkPolicy default-deny + 서비스별 allow.
+#
+# ⚠️ CNI 요건
+# 이 파일의 정책은 NetworkPolicy 를 실제로 enforce 하는 CNI
+# (Calico, Cilium, Kube-router 등) 가 있어야 작동한다.
+# 현재 맥미니 k3d 기본 CNI 인 flannel 은 API 를 수락하지만 패킷 필터링을
+# 하지 않는다 — 정책이 apply 돼도 차단 없음 (fail-open).
+#
+# 본 매니페스트는 "선언적 의도" 로 먼저 도입한다. CNI 교체는 후속 티켓:
+#   1) k3d cluster delete senior-album
+#   2) k3d cluster create senior-album --k3s-arg '--flannel-backend=none@server:*'
+#                                      --k3s-arg '--disable-network-policy@server:*'
+#      (NetworkPolicy controller 도 끄고 Calico 로 대체)
+#   3) kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/<ver>/manifests/calico.yaml
+#   4) 기존 워크로드 재apply.
+# 위 절차는 데이터 유지 PVC 마이그레이션 계획이 필요하므로 별도 티켓에서 수행.
+#
+# ⚠️ minio-init Job
+# k8s/minio.yaml 의 minio-init Job 은 pod 에 `app: minio-init` 라벨을
+# 이 PR 에서 같이 추가한다. 기존 클러스터에 Job 이 이미 완료된 상태라면
+# 재실행할 필요는 없으나, 신규 환경 bootstrap 시에는 라벨 포함된 버전이
+# 적용돼야 policy 를 통과한다.
+#
+# ⚠️ 외부 egress (443)
+# `ipBlock: 0.0.0.0/0` + except RFC1918 로 "내부 클러스터 외 모든 곳" 을
+# 표현. 메타데이터 서버(169.254.169.254) 차단을 원하면 except 에 추가.
+# 맥미니 홈 네트워크는 보통 192.168.x 이므로 LAN 도 차단됨 — 필요 시 풀기.
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: senior-album
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+
+---
+# DNS: 모든 파드 → kube-system CoreDNS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: senior-album
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+---
+# frontend: Traefik(kube-system) + cloudflared + uptime-kuma 에서 :80.
+#           egress 는 backend:8000.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: frontend
+  namespace: senior-album
+spec:
+  podSelector:
+    matchLabels:
+      app: frontend
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+        - podSelector:
+            matchLabels:
+              app: cloudflared
+        - podSelector:
+            matchLabels:
+              app: uptime-kuma
+      ports:
+        - protocol: TCP
+          port: 80
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: backend
+      ports:
+        - protocol: TCP
+          port: 8000
+
+---
+# backend: frontend + Traefik(로컬 ingress 경로) + uptime-kuma 에서 :8000.
+#          egress 는 postgres/redis/opensearch/minio + 외부 HTTPS
+#          (카카오 OAuth, CoolSMS, ghcr, 기타 API).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend
+  namespace: senior-album
+spec:
+  podSelector:
+    matchLabels:
+      app: backend
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: frontend
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+        - podSelector:
+            matchLabels:
+              app: uptime-kuma
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+              app: redis
+      ports:
+        - protocol: TCP
+          port: 6379
+    - to:
+        - podSelector:
+            matchLabels:
+              app: opensearch
+      ports:
+        - protocol: TCP
+          port: 9200
+    - to:
+        - podSelector:
+            matchLabels:
+              app: minio
+      ports:
+        - protocol: TCP
+          port: 9000
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+
+---
+# postgres: backend + postgres-backup 에서 :5432.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres
+  namespace: senior-album
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: backend
+        - podSelector:
+            matchLabels:
+              app: postgres-backup
+      ports:
+        - protocol: TCP
+          port: 5432
+
+---
+# redis: backend 에서 :6379.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis
+  namespace: senior-album
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: backend
+      ports:
+        - protocol: TCP
+          port: 6379
+
+---
+# opensearch: backend 에서 :9200.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: opensearch
+  namespace: senior-album
+spec:
+  podSelector:
+    matchLabels:
+      app: opensearch
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: backend
+      ports:
+        - protocol: TCP
+          port: 9200
+
+---
+# minio: backend + minio-backup + minio-init 에서 :9000.
+#        console (:9001) 은 기본 차단. 필요 시 port-forward 로만 접근.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: minio
+  namespace: senior-album
+spec:
+  podSelector:
+    matchLabels:
+      app: minio
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: backend
+        - podSelector:
+            matchLabels:
+              app: minio-backup
+        - podSelector:
+            matchLabels:
+              app: minio-init
+      ports:
+        - protocol: TCP
+          port: 9000
+
+---
+# cloudflared: egress to frontend:80 + Cloudflare tunnel (7844/UDP, 443/TCP).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cloudflared
+  namespace: senior-album
+spec:
+  podSelector:
+    matchLabels:
+      app: cloudflared
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: frontend
+      ports:
+        - protocol: TCP
+          port: 80
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 7844
+        - protocol: UDP
+          port: 7844
+
+---
+# uptime-kuma: Traefik + cloudflared 에서 :3001 (관리자 UI 외부 노출 시).
+#              egress: 내부 서비스 전반 + 외부 HTTPS (공개 URL ping).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: uptime-kuma
+  namespace: senior-album
+spec:
+  podSelector:
+    matchLabels:
+      app: uptime-kuma
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+        - podSelector:
+            matchLabels:
+              app: cloudflared
+      ports:
+        - protocol: TCP
+          port: 3001
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: frontend
+      ports:
+        - protocol: TCP
+          port: 80
+    - to:
+        - podSelector:
+            matchLabels:
+              app: backend
+      ports:
+        - protocol: TCP
+          port: 8000
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+              app: redis
+      ports:
+        - protocol: TCP
+          port: 6379
+    - to:
+        - podSelector:
+            matchLabels:
+              app: opensearch
+      ports:
+        - protocol: TCP
+          port: 9200
+    - to:
+        - podSelector:
+            matchLabels:
+              app: minio
+      ports:
+        - protocol: TCP
+          port: 9000
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+
+---
+# minio-backup CronJob: egress to minio:9000 + R2 (외부 443).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: minio-backup
+  namespace: senior-album
+spec:
+  podSelector:
+    matchLabels:
+      app: minio-backup
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: minio
+      ports:
+        - protocol: TCP
+          port: 9000
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+
+---
+# postgres-backup CronJob: egress to postgres:5432 + dl.min.io/R2 (외부 443).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-backup
+  namespace: senior-album
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres-backup
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+
+---
+# minio-init one-shot Job: egress to minio:9000 (bucket bootstrap).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: minio-init
+  namespace: senior-album
+spec:
+  podSelector:
+    matchLabels:
+      app: minio-init
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: minio
+      ports:
+        - protocol: TCP
+          port: 9000

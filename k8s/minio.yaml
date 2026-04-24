@@ -81,8 +81,13 @@ kind: Job
 metadata:
   name: minio-init
   namespace: senior-album
+  labels:
+    app: minio-init
 spec:
   template:
+    metadata:
+      labels:
+        app: minio-init
     spec:
       restartPolicy: OnFailure
       initContainers:
