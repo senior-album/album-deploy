@@ -1,13 +1,3 @@
-apiVersion: v1
-kind: Secret
-metadata:
-  name: cloudflared-secret
-  namespace: senior-album
-type: Opaque
-stringData:
-  # ⚠️ cloudflared tunnel create 후 발급받은 토큰으로 교체\!
-  TUNNEL_TOKEN: "CHANGE-ME"
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
