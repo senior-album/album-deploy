@@ -228,7 +228,8 @@ spec:
           port: 9200
 
 ---
-# minio: backend + minio-backup + minio-init 에서 :9000.
+# minio: backend + minio-backup + minio-init + cloudflared 에서 :9000.
+#        cloudflared 는 storage.thekim123.info 서브도메인이 MinIO 로 직접 라우팅되는 구조라 필요.
 #        console (:9001) 은 기본 차단. 필요 시 port-forward 로만 접근.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -251,12 +252,16 @@ spec:
         - podSelector:
             matchLabels:
               app: minio-init
+        - podSelector:
+            matchLabels:
+              app: cloudflared
       ports:
         - protocol: TCP
           port: 9000
 
 ---
-# cloudflared: egress to frontend:80 + Cloudflare tunnel (7844/UDP, 443/TCP).
+# cloudflared: egress to frontend:80 + minio:9000 + Cloudflare tunnel (7844/UDP, 443/TCP).
+# minio 는 storage.thekim123.info 서브도메인이 MinIO 로 직접 라우팅 (presigned URL 다운로드).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -275,6 +280,13 @@ spec:
       ports:
         - protocol: TCP
           port: 80
+    - to:
+        - podSelector:
+            matchLabels:
+              app: minio
+      ports:
+        - protocol: TCP
+          port: 9000
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
