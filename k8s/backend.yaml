@@ -1,3 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: backend-uploads-pvc
+  namespace: senior-album
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 2Gi
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -5,6 +16,9 @@ metadata:
   namespace: senior-album
 spec:
   replicas: 1
+  # RWO PVC 라 롤링 업데이트 중 신구 파드가 동시에 볼륨을 잡으면 stuck 됨
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: backend
@@ -54,7 +68,8 @@ spec:
 
       volumes:
         - name: uploads
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: backend-uploads-pvc
 ---
 apiVersion: v1
 kind: Service
