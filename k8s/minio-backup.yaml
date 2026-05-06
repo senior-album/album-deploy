@@ -47,8 +47,10 @@ spec:
                   echo "[backup] start $(date -u +%FT%TZ)"
                   mc alias set src http://minio:9000 "$SRC_ACCESS_KEY" "$SRC_SECRET_KEY"
                   mc alias set r2 "$R2_ENDPOINT" "$R2_ACCESS_KEY" "$R2_SECRET_KEY"
-                  # 버킷이 없으면 생성. 이미 있어도 에러 내지 않음.
-                  mc mb --ignore-existing "r2/$R2_BUCKET"
+                  # bucket 은 R2 대시보드에서 미리 생성되어 있다 — 여기서 mc mb
+                  # 호출 안 함. R2 의 object-only API 토큰은 bucket 생성 권한이
+                  # 없어 `mc mb --ignore-existing` 도 Access Denied 로 죽기 때문
+                  # (T-130 = T-043/T-044 follow-up: 5일간 매일 backup 실패한 원인).
                   # --remove 미사용: source 오염이 target 에 전파되는 걸 차단.
                   mc mirror --overwrite "src/senior-album-photos" "r2/$R2_BUCKET"
                   echo "[backup] done $(date -u +%FT%TZ)"
