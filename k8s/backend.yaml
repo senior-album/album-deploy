@@ -32,7 +32,9 @@ spec:
         # revision 을 올리면 Deployment 의 pod template 해시가 바뀌어 ArgoCD sync
         # 시 rolling update 가 강제된다. backend-secret 의 OPENSEARCH_* 키를
         # 회전할 때마다 같이 올려야 함.
-        album.io/secret-revision: "T-004c"
+        # T-055: JWT rolling key 인프라 도입 — JWT_KEY_V1 / JWT_REFRESH_KEY_V1
+        # envvar 매핑 추가에 맞춰 revision 갱신 (rollout 강제).
+        album.io/secret-revision: "T-055"
     spec:
       imagePullSecrets:
         - name: ghcr-secret
@@ -43,6 +45,28 @@ spec:
           env:
             - name: NO_ALBUMENTATIONS_UPDATE
               value: "1"
+            # T-055: JWT 키 회전(rolling key) 인프라.
+            # 첫 도입 단계 — 기존 backend-secret 의 JWT_SECRET / JWT_REFRESH_SECRET
+            # 을 'v1' kid 로 한 번 더 노출한다. 결과 keyset = {v1: <기존값>,
+            # legacy: <기존값>}. 새 토큰은 kid=v1 헤더로 발급되고, 기존 토큰은
+            # 'legacy' fallback 으로 검증되므로 사용자 강제 로그아웃 없이 인프라만
+            # 도입 완료. 진짜 첫 회전(새 secret 으로 v2 추가 → ACTIVE 전환 →
+            # grace 후 v1/legacy 제거) 은 별도 PR + kubeseal reseal 단계로 분리.
+            # 운영 절차: album-deploy/docs/JWT_KEY_ROTATION.md 참조.
+            - name: JWT_KEY_V1
+              valueFrom:
+                secretKeyRef:
+                  name: backend-secret
+                  key: JWT_SECRET
+            - name: JWT_REFRESH_KEY_V1
+              valueFrom:
+                secretKeyRef:
+                  name: backend-secret
+                  key: JWT_REFRESH_SECRET
+            - name: JWT_ACTIVE_KID
+              value: "v1"
+            - name: JWT_REFRESH_ACTIVE_KID
+              value: "v1"
           ports:
             - containerPort: 8000
           envFrom:
