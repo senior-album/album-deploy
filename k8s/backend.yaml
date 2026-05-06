@@ -26,6 +26,13 @@ spec:
     metadata:
       labels:
         app: backend
+      annotations:
+        # T-004c: backend-secret 에 OPENSEARCH_* 키가 추가됐을 때 envFrom 만으로는
+        # 기존 pod 가 옛 env 를 들고 살아있어 새 키를 픽업 못 한다. 이 annotation
+        # revision 을 올리면 Deployment 의 pod template 해시가 바뀌어 ArgoCD sync
+        # 시 rolling update 가 강제된다. backend-secret 의 OPENSEARCH_* 키를
+        # 회전할 때마다 같이 올려야 함.
+        album.io/secret-revision: "T-004c"
     spec:
       imagePullSecrets:
         - name: ghcr-secret

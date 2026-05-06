@@ -82,33 +82,49 @@ git push
 
 ---
 
-## c 단계 — 활성화 (별도 PR, 한 sync 로 동시 전환)
+## c 단계 — 활성화 (한 PR / 한 sync 동시 전환)
 
 c 의 핵심 원칙: **opensearch.yaml security 활성화 + backend-secret 의 OPENSEARCH_*
 키 추가가 같은 PR / 같은 ArgoCD sync 안에 묶여야 한다**. 하나만 들어가면
-backend ↔ opensearch 인증 미스매치로 짧은 다운타임.
+backend ↔ opensearch 인증 미스매치로 다운타임.
 
-c 의 작업 항목 (구현 시점에 본 문서 보강):
-1. `k8s/opensearch.yaml`:
-   - 이미지 bump: `opensearchproject/opensearch:2.11.0` → `2.18.0` (이상). 2.12+ 에서
-     `OPENSEARCH_INITIAL_ADMIN_PASSWORD` 가 필수가 되므로 동시에 처리.
-   - `DISABLE_SECURITY_PLUGIN: "true"` 제거
-   - `OPENSEARCH_INITIAL_ADMIN_PASSWORD` env 를 `opensearch-security-secret.admin-password`
-     에서 주입 (안전 디폴트, 실제 admin 인증은 mount 된 internal_users.yml 의 hash)
-   - `opensearch-security-secret.internal_users.yml` 을 subPath 로 mount —
-     `/usr/share/opensearch/config/opensearch-security/internal_users.yml`
-2. `k8s/sealed/backend-secret.yaml` 에 추가 (kubeseal --merge-into):
-   - `OPENSEARCH_USE_SSL=true`
-   - `OPENSEARCH_VERIFY_CERTS=false`
-   - `OPENSEARCH_USER=album_backend`
-   - `OPENSEARCH_PASSWORD=<opensearch-security-secret.backend-password 의 평문>`
+### 1. opensearch.yaml 변경 (이 브랜치에 이미 반영)
 
-backend-password 는 c 시점에 클러스터에서 추출:
+- `DISABLE_SECURITY_PLUGIN: "true"` 제거 → 컨테이너 entrypoint 의
+  `install_demo_configuration.sh` 가 자동 실행되어 self-signed cert +
+  `opensearch.yml` 의 security 설정 (TLS, transport SSL, REST SSL) 을 추가
+- `plugins.security.allow_default_init_securityindex: "true"` env 추가 →
+  plugin 이 첫 부팅 시 `.opendistro_security` 인덱스를 자동 초기화. 마운트된
+  config 파일들 (우리 `internal_users.yml` 포함) 이 cluster 로 푸시됨
+- `internal_users.yml` 을 subPath 로 마운트 →
+  `/usr/share/opensearch/config/opensearch-security/internal_users.yml`. 디렉토리
+  통째 마운트는 `roles.yml`/`config.yml`/`action_groups.yml` 등 디폴트가 사라져
+  보안 플러그인이 아예 안 뜬다. **반드시 subPath**.
+- 이미지 2.11.0 그대로 유지. `OPENSEARCH_INITIAL_ADMIN_PASSWORD` env 는 2.12+
+  에서만 의미 있고, 우리는 마운트된 `internal_users.yml` 의 hash 가 admin 비번을
+  결정하므로 불필요.
+
+### 2. backend-secret 봉인 (운영자가 Mac mini 에서 실행)
+
+c 브랜치 (예: `feat/T-004c-opensearch-security-activation`) 에 opensearch.yaml
+변경이 이미 들어있는 상태에서, 같은 브랜치에 backend-secret 갱신 commit 을
+얹어서 PR 을 띄운다.
 
 ```bash
+cd /Users/thekim123/workspace/senior-album/album-deploy
+git checkout feat/T-004c-opensearch-security-activation
+git pull
+
+# kubeseal controller 위치 (필요 시 override)
+SEALED_CONTROLLER_NAME="${SEALED_CONTROLLER_NAME:-sealed-secrets-controller}"
+SEALED_CONTROLLER_NS="${SEALED_CONTROLLER_NS:-kube-system}"
+
+# opensearch-security-secret 에서 backend 비번 추출 (Mac mini 로컬 평문)
 BACKEND_PW="$(kubectl -n senior-album get secret opensearch-security-secret \
   -o jsonpath='{.data.backend-password}' | base64 -d)"
+[ -n "$BACKEND_PW" ] || { echo "추출 실패"; exit 1; }
 
+# 4 키를 한 번의 kubeseal 호출로 backend-secret 에 merge-into
 kubectl -n senior-album create secret generic backend-secret \
   --from-literal=OPENSEARCH_USE_SSL=true \
   --from-literal=OPENSEARCH_VERIFY_CERTS=false \
@@ -120,7 +136,52 @@ kubectl -n senior-album create secret generic backend-secret \
            --format yaml --merge-into k8s/sealed/backend-secret.yaml
 
 unset BACKEND_PW
+
+git diff k8s/sealed/backend-secret.yaml
+# 4 키만 새로 encryptedData 에 추가됐는지 확인 (기존 키들은 그대로)
+
+git add k8s/sealed/backend-secret.yaml
+git commit -m "security(backend): T-004c — backend-secret 에 OPENSEARCH_* 4 키 추가 (roadmap#4)"
+git push
 ```
+
+### 3. 머지 후 검증 (~2 분 후)
+
+```bash
+# opensearch 새 pod 가 잘 떴는지 + security init 됐는지
+kubectl -n senior-album get pods -l app=opensearch
+kubectl -n senior-album logs -l app=opensearch --tail=50 | grep -E 'sgctl|securityadmin|init|started'
+
+# backend 가 SSL+auth 로 OS 에 붙었는지 — face_embeddings 카운트
+kubectl -n senior-album logs -l app=backend --tail=30 | grep -i opensearch
+
+# admin 비번으로 cluster 응답 확인
+ADMIN_PW="$(kubectl -n senior-album get secret opensearch-security-secret \
+  -o jsonpath='{.data.admin-password}' | base64 -d)"
+kubectl -n senior-album exec deploy/opensearch -- \
+  curl -k -u "admin:$ADMIN_PW" https://localhost:9200/_cluster/health
+unset ADMIN_PW
+# 기대: {"status":"yellow"|"green",...}
+```
+
+### 4. 만약 auto-init 가 실패하면 (수동 securityadmin.sh)
+
+`plugins.security.allow_default_init_securityindex` 가 어떤 이유로 작동하지
+않으면 cluster 가 "no admin" 상태로 떠서 모든 API 가 거부된다. 수동으로
+demo cert 의 admin 인 `kirk.pem` 으로 securityadmin.sh 를 호출:
+
+```bash
+kubectl -n senior-album exec deploy/opensearch -- \
+  bash /usr/share/opensearch/plugins/opensearch-security/tools/securityadmin.sh \
+    -cd /usr/share/opensearch/config/opensearch-security \
+    -icl -nhnv \
+    -cacert /usr/share/opensearch/config/root-ca.pem \
+    -cert /usr/share/opensearch/config/kirk.pem \
+    -key /usr/share/opensearch/config/kirk-key.pem
+```
+
+이 명령이 cluster 에 config 파일들을 푸시한다. 정상적이면 위 §3 의 cluster
+health curl 이 통과.
 
 ---
 
