@@ -2,19 +2,12 @@
 # T-052: NetworkPolicy default-deny + 서비스별 allow.
 #
 # ⚠️ CNI 요건
-# 이 파일의 정책은 NetworkPolicy 를 실제로 enforce 하는 CNI
-# (Calico, Cilium, Kube-router 등) 가 있어야 작동한다.
-# 현재 맥미니 k3d 기본 CNI 인 flannel 은 API 를 수락하지만 패킷 필터링을
-# 하지 않는다 — 정책이 apply 돼도 차단 없음 (fail-open).
-#
-# 본 매니페스트는 "선언적 의도" 로 먼저 도입한다. CNI 교체는 후속 티켓:
-#   1) k3d cluster delete senior-album
-#   2) k3d cluster create senior-album --k3s-arg '--flannel-backend=none@server:*'
-#                                      --k3s-arg '--disable-network-policy@server:*'
-#      (NetworkPolicy controller 도 끄고 Calico 로 대체)
-#   3) kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/<ver>/manifests/calico.yaml
-#   4) 기존 워크로드 재apply.
-# 위 절차는 데이터 유지 PVC 마이그레이션 계획이 필요하므로 별도 티켓에서 수행.
+# 이 파일의 정책은 NetworkPolicy 를 실제로 enforce 하는 controller 가 있어야
+# 작동한다. **k3s 는 기본적으로 임베드 kube-router NPC 가 enforce 한다**
+# (T-182 follow-up 검증 — fresh Job pod 가 매칭되는 netpol 없이 postgres 닿지
+# 못함). 즉 정책 누락 = 트래픽 drop. fail-open 아님.
+# `--disable-network-policy` 또는 별도 CNI(Calico/Cilium) 교체는 후속 티켓
+# T-052-1 (deferred — 클라우드 이관 시 자연 해소).
 #
 # ⚠️ minio-init Job
 # k8s/minio.yaml 의 minio-init Job 은 pod 에 `app: minio-init` 라벨을
@@ -162,7 +155,9 @@ spec:
           port: 443
 
 ---
-# postgres: backend + postgres-backup 에서 :5432.
+# postgres: backend + postgres-backup + cron 들에서 :5432.
+# birthday-cron / log-purge-cron 은 단명 Job 으로 backend 와 분리된 라벨을
+# 갖는다 — 각자 명시적으로 allow.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -181,6 +176,12 @@ spec:
         - podSelector:
             matchLabels:
               app: postgres-backup
+        - podSelector:
+            matchLabels:
+              app: backend-birthday-cron
+        - podSelector:
+            matchLabels:
+              app: backend-log-purge-cron
       ports:
         - protocol: TCP
           port: 5432
@@ -445,6 +446,50 @@ spec:
       ports:
         - protocol: TCP
           port: 443
+
+---
+# T-243-3 — backend-birthday-cron: egress to postgres:5432.
+# DNS 는 `allow-dns` 가 모든 pod 에 이미 허용. R2/외부 호출 없음.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend-birthday-cron
+  namespace: senior-album
+spec:
+  podSelector:
+    matchLabels:
+      app: backend-birthday-cron
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+
+---
+# T-182 — backend-log-purge-cron: egress to postgres:5432.
+# DNS 는 `allow-dns` 가 모든 pod 에 이미 허용. R2/외부 호출 없음.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend-log-purge-cron
+  namespace: senior-album
+spec:
+  podSelector:
+    matchLabels:
+      app: backend-log-purge-cron
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
 
 ---
 # minio-init one-shot Job: egress to minio:9000 (bucket bootstrap).
