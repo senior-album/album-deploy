@@ -26,3 +26,10 @@ ArgoCD 가 자기 자신을 sync 하지 않으므로 수동 apply 가 필수. Ap
 - `applications/senior-album.yaml` — 메인 senior-album 네임스페이스 sync.
   `directory.recurse: true` 가 켜져 있어 `k8s/sealed/` 하위 SealedSecret 도
   자동 sync 대상에 포함.
+
+## Notifications
+
+- `notifications/` — argocd-notifications-controller 용 ConfigMap + Secret +
+  Discord webhook 설정 (T-129). senior-album Application 의 destination 밖
+  (`argocd` 네임스페이스) 이라 GitOps 자동 sync 대상이 아니고 수동 apply.
+  자세한 절차는 `notifications/README.md`.

@@ -1,0 +1,125 @@
+---
+# T-129: ArgoCD Notifications → Discord
+#
+# argocd-notifications-controller (ArgoCD 2.6+ 번들) 가 이 ConfigMap 의
+# trigger / template / service 정의를 읽어 Application 의 라이프사이클 이벤트를
+# Discord webhook 으로 푸시.
+#
+# 적용:
+#   kubectl apply -f argocd/notifications/argocd-notifications-cm.yaml
+#
+# webhook URL 은 별도 Secret (`argocd-notifications-secret`, 같은 네임스페이스)
+# 의 `discord-webhook-url` 키에서 주입. argocd-notifications-secret.yaml.example
+# 참조.
+#
+# Application 별 구독은 Application metadata.annotations 에:
+#   notifications.argoproj.io/subscribe.<trigger>.discord: ""
+# 형태로 등록. argocd/applications/senior-album.yaml 참고.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-notifications-cm
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-notifications-cm
+    app.kubernetes.io/part-of: argocd
+data:
+  # ── Service ─────────────────────────────────────────────────
+  # Discord 는 native 지원이 없어 webhook service 로 등록하고 Discord 의
+  # JSON payload 형식 (`username` + `content`) 을 직접 작성.
+  service.webhook.discord: |
+    url: $discord-webhook-url
+    headers:
+    - name: Content-Type
+      value: application/json
+
+  # ── Templates ───────────────────────────────────────────────
+  # 모든 동적 문자열은 printf + toJson 으로 감싸 JSON escape 안전성 확보
+  # (operationState.message 에 따옴표/개행이 들어와도 깨지지 않음).
+
+  template.app-sync-running: |
+    webhook:
+      discord:
+        method: POST
+        body: |
+          {
+            "username": "ArgoCD",
+            "content": {{ printf "🔄 Sync 시작 — **%s** @ `%s`" .app.metadata.name (.app.status.sync.revision | default "unknown" | trunc 7) | toJson }}
+          }
+
+  template.app-deployed: |
+    webhook:
+      discord:
+        method: POST
+        body: |
+          {
+            "username": "ArgoCD",
+            "content": {{ printf "✅ Sync 성공 — **%s**\nRevision `%s` · Health `%s`" .app.metadata.name (.app.status.sync.revision | default "unknown" | trunc 7) .app.status.health.status | toJson }}
+          }
+
+  template.app-sync-failed: |
+    webhook:
+      discord:
+        method: POST
+        body: |
+          {
+            "username": "ArgoCD",
+            "content": {{ printf "❌ Sync 실패 — **%s**\nPhase: `%s`\n```\n%s\n```" .app.metadata.name .app.status.operationState.phase (.app.status.operationState.message | default "(no message)" | trunc 1500) | toJson }}
+          }
+
+  template.app-health-degraded: |
+    webhook:
+      discord:
+        method: POST
+        body: |
+          {
+            "username": "ArgoCD",
+            "content": {{ printf "⚠️ Health Degraded — **%s**\nSync `%s` · Health `%s`" .app.metadata.name .app.status.sync.status .app.status.health.status | toJson }}
+          }
+
+  template.app-out-of-sync: |
+    webhook:
+      discord:
+        method: POST
+        body: |
+          {
+            "username": "ArgoCD",
+            "content": {{ printf "🟡 OutOfSync 지속 — **%s**\nselfHeal 자동 복구가 안 되고 있음. desired ↔ live 차이 확인 필요. Revision `%s`" .app.metadata.name (.app.status.sync.revision | default "unknown" | trunc 7) | toJson }}
+          }
+
+  # ── Triggers ────────────────────────────────────────────────
+  # 평가 주기는 argocd-notifications-controller 의 reconciliation loop (기본 60s).
+  # 각 Application 이 annotation 으로 구독한 trigger 만 발사.
+
+  trigger.on-sync-running: |
+    - description: Sync operation 이 시작됨 (수동 sync + autosync 양쪽)
+      send: [app-sync-running]
+      when: app.status.operationState != nil and app.status.operationState.phase == 'Running'
+
+  trigger.on-deployed: |
+    - description: 새 revision sync 완료 + Healthy
+      send: [app-deployed]
+      when: app.status.operationState != nil and app.status.operationState.phase == 'Succeeded' and app.status.health.status == 'Healthy' and app.status.sync.status == 'Synced'
+      oncePer: app.status.sync.revision
+
+  trigger.on-sync-failed: |
+    - description: Sync operation 이 Error / Failed 로 종료
+      send: [app-sync-failed]
+      when: app.status.operationState != nil and app.status.operationState.phase in ['Error', 'Failed']
+      oncePer: app.status.operationState.syncResult.revision
+
+  trigger.on-health-degraded: |
+    - description: Health 가 Degraded 로 떨어짐
+      send: [app-health-degraded]
+      when: app.status.health.status == 'Degraded'
+
+  # OutOfSync "5 분 이상" 의 엄밀한 시간 임계는 expression 엔진의 time 처리가
+  # 버전별로 불안정해서 oncePer 로 대체: revision + sync.status 단위로 1 회만
+  # 알림. selfHeal+autosync 가 정상이면 OutOfSync 는 다음 reconciliation 에서
+  # 즉시 해소되므로, 이 알림이 뜨면 곧 self-heal 실패 ≒ "5 분 stuck" 시나리오
+  # (autosync interval 기본 3 분 + notifications poll 1 분 ≒ 사실상 4~5 분 지연).
+  trigger.on-out-of-sync: |
+    - description: selfHeal 이 못 잡는 OutOfSync (active sync 없을 때만 발사)
+      send: [app-out-of-sync]
+      when: app.status.sync.status == 'OutOfSync' and (app.status.operationState == nil or app.status.operationState.phase in ['Succeeded', 'Failed', 'Error'])
+      oncePer: app.status.sync.revision

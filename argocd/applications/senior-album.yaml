@@ -3,6 +3,15 @@ kind: Application
 metadata:
   name: senior-album
   namespace: argocd
+  annotations:
+    # T-129: argocd-notifications-controller 가 이 annotation 을 보고 trigger
+    # 매칭 시 `discord` 서비스로 알림 발송. trigger / template 정의는
+    # argocd-notifications-cm (argocd 네임스페이스) 참조.
+    notifications.argoproj.io/subscribe.on-sync-running.discord: ""
+    notifications.argoproj.io/subscribe.on-deployed.discord: ""
+    notifications.argoproj.io/subscribe.on-sync-failed.discord: ""
+    notifications.argoproj.io/subscribe.on-health-degraded.discord: ""
+    notifications.argoproj.io/subscribe.on-out-of-sync.discord: ""
 spec:
   project: default
   source:
