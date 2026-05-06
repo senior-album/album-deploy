@@ -109,7 +109,7 @@ EOF
 
 # stringData Secret 생성 → kubeseal 로 봉인
 # --from-file 은 파일을 만들어야 하므로 process substitution 으로 우회 (디스크에 평문 안 남김)
-TMP_SECRET="$(mktemp -t opensearch-sec-secret.XXXXXX)"
+TMP_SECRET="$(mktemp "${TMPDIR:-/tmp}/opensearch-sec-secret.XXXXXX")"
 trap 'rm -f "$TMP_SECRET"' EXIT
 
 # kubectl create secret 의 stringData 모드로 평문 Secret 생성 (디스크 평문은 mktemp 파일 1 회뿐)
