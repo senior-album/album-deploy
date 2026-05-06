@@ -1,0 +1,69 @@
+---
+# T-243-3: 생신 자동 발급 + D-7 인앱 알림 cron.
+#
+# 스케줄: 매일 09:00 KST (00:00 UTC). postgres-backup (18:00 UTC) / minio-backup
+# (17:30 UTC) 와 겹치지 않는 시간대. 사용자가 출근해서 알림을 확인하기 좋은
+# 한국 표준시 오전.
+#
+# 동작 (`app/scripts/birthday_reminder.py` 참조):
+#   1) 활성 입소자 중 `birth_date` decrypt → 오늘 + 7일 = target_date 매칭
+#   2) Event(type='birthday', start_at=올해 생일 00:00, all_day=True) 멱등 생성
+#      dedup 키: (resident_id, type='birthday', year(start_at) = target_year)
+#   3) 보호자(승인) + 시설 활성 staff 에게 Notification 발송
+#      (notification_type='event_birthday_reminder')
+#
+# 의존성:
+#   - backend-config + backend-secret (envFrom) — RESIDENT_PII_KEK,
+#     RESIDENT_NAME_HMAC_KEY, POSTGRES_* 등 backend deployment 와 동일.
+#   - backend image — backend Deployment 와 같은 sha 를 사용해 코드 일관성 유지.
+#     image 업데이트 자동화가 backend.yaml 갱신 시 본 파일은 수동 sync 가
+#     필요할 수 있다 (자동화 스크립트 후속 정비 대상).
+#
+# 실패 시: backoffLimit=2 + activeDeadlineSeconds=600 — 10분 안에 못 끝내면
+# abort. failedJobsHistoryLimit=5 라 최근 5회 실패 파드 보존 → 운영자가
+# `kubectl logs` 로 사후 진단 가능.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backend-birthday-cron
+  namespace: senior-album
+  labels:
+    app: backend-birthday-cron
+spec:
+  schedule: "0 0 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  startingDeadlineSeconds: 3600
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels:
+            app: backend-birthday-cron
+        spec:
+          restartPolicy: OnFailure
+          imagePullSecrets:
+            - name: ghcr-secret
+          containers:
+            - name: birthday-reminder
+              image: ghcr.io/senior-album/album-backend:e8fd08a
+              imagePullPolicy: Always
+              command:
+                - python
+                - -m
+                - app.scripts.birthday_reminder
+              envFrom:
+                - configMapRef:
+                    name: backend-config
+                - secretRef:
+                    name: backend-secret
+              resources:
+                requests:
+                  memory: "256Mi"
+                  cpu: "100m"
+                limits:
+                  memory: "768Mi"
+                  cpu: "500m"
