@@ -1,0 +1,187 @@
+---
+# T-127: Grafana dashboards (provisioned).
+#
+# 추가 dashboard 가 생기면 이 ConfigMap 의 data 키를 한 줄 더 늘리면 된다
+# (`<name>.json: |` + JSON 본문). 30초 주기로 grafana 가 reload 한다.
+#
+# 라벨/필드 의존성:
+#   - 라벨: namespace, app, pod, container, level (T-127 alloy stage)
+#   - JSON 필드: logger, message, module, funcName (backend python-json-logger)
+#   - level 라벨이 없는 라인 (postgres / redis / minio / opensearch 등 비-JSON
+#     stdout) 은 level 별 패널에서 빈 series 로 합쳐진다 — 의도된 동작.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  namespace: senior-album
+data:
+  senior-album-overview.json: |
+    {
+      "title": "Senior Album — 운영 가시성",
+      "uid": "senior-album-overview",
+      "tags": ["senior-album", "loki", "ops"],
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "30s",
+      "time": { "from": "now-1h", "to": "now" },
+      "timezone": "browser",
+      "editable": true,
+      "annotations": { "list": [] },
+      "templating": { "list": [] },
+      "panels": [
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "전체 로그 rate (lines/sec)",
+          "gridPos": { "x": 0, "y": 0, "w": 8, "h": 4 },
+          "datasource": { "type": "loki", "uid": "loki" },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum(rate({namespace=\"senior-album\"}[$__rate_interval]))",
+              "queryType": "range"
+            }
+          ],
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "colorMode": "value",
+            "graphMode": "area"
+          },
+          "fieldConfig": { "defaults": { "unit": "short", "decimals": 1 } }
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "Errors (지난 1시간)",
+          "gridPos": { "x": 8, "y": 0, "w": 8, "h": 4 },
+          "datasource": { "type": "loki", "uid": "loki" },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum(count_over_time({namespace=\"senior-album\", level=\"ERROR\"}[1h]))",
+              "queryType": "instant"
+            }
+          ],
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "colorMode": "background"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 1 },
+                  { "color": "red", "value": 10 }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "Warnings (지난 1시간)",
+          "gridPos": { "x": 16, "y": 0, "w": 8, "h": 4 },
+          "datasource": { "type": "loki", "uid": "loki" },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum(count_over_time({namespace=\"senior-album\", level=\"WARNING\"}[1h]))",
+              "queryType": "instant"
+            }
+          ],
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "colorMode": "value"
+          },
+          "fieldConfig": { "defaults": { "unit": "short" } }
+        },
+        {
+          "id": 4,
+          "type": "timeseries",
+          "title": "Level 별 로그 rate",
+          "gridPos": { "x": 0, "y": 4, "w": 24, "h": 8 },
+          "datasource": { "type": "loki", "uid": "loki" },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (level) (rate({namespace=\"senior-album\"}[$__rate_interval]))",
+              "queryType": "range",
+              "legendFormat": "{{level}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "bars",
+                "lineInterpolation": "linear",
+                "fillOpacity": 70,
+                "stacking": { "mode": "normal", "group": "A" }
+              },
+              "unit": "short"
+            }
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "list", "placement": "bottom" }
+          }
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "Container 별 로그 rate",
+          "gridPos": { "x": 0, "y": 12, "w": 24, "h": 8 },
+          "datasource": { "type": "loki", "uid": "loki" },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (container) (rate({namespace=\"senior-album\"}[$__rate_interval]))",
+              "queryType": "range",
+              "legendFormat": "{{container}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "fillOpacity": 10,
+                "stacking": { "mode": "normal", "group": "A" }
+              },
+              "unit": "short"
+            }
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "list", "placement": "bottom" }
+          }
+        },
+        {
+          "id": 6,
+          "type": "logs",
+          "title": "최근 ERROR / CRITICAL",
+          "gridPos": { "x": 0, "y": 20, "w": 24, "h": 12 },
+          "datasource": { "type": "loki", "uid": "loki" },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "{namespace=\"senior-album\", level=~\"ERROR|CRITICAL\"} | json",
+              "queryType": "range"
+            }
+          ],
+          "options": {
+            "showTime": true,
+            "showLabels": false,
+            "showCommonLabels": false,
+            "wrapLogMessage": true,
+            "prettifyLogMessage": false,
+            "enableLogDetails": true,
+            "dedupStrategy": "none",
+            "sortOrder": "Descending"
+          }
+        }
+      ]
+    }

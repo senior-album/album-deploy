@@ -26,6 +26,10 @@ data:
     apiVersion: 1
     datasources:
       - name: Loki
+        # T-127: uid 를 고정해 dashboard 패널이 환경 간 동일한 reference 로
+        # 동작하도록. 미지정 시 grafana 가 random uid 를 발급해서 provisioned
+        # dashboard 의 datasource binding 이 깨진다.
+        uid: loki
         type: loki
         access: proxy
         url: http://loki:3100
@@ -33,6 +37,29 @@ data:
         jsonData:
           maxLines: 1000
           timeout: 60
+---
+# T-127: dashboard provisioning provider — /etc/grafana/dashboards 의
+# JSON 파일들을 자동 로드. ConfigMap (`grafana-dashboards`) 한 개에 dashboard
+# 들을 모아두고 30초 간격으로 reload.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards-provider
+  namespace: senior-album
+data:
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: senior-album
+        orgId: 1
+        folder: ''
+        type: file
+        disableDeletion: false
+        updateIntervalSeconds: 30
+        allowUiUpdates: false
+        options:
+          path: /etc/grafana/dashboards
+          foldersFromFilesStructure: false
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -84,6 +111,11 @@ spec:
               mountPath: /var/lib/grafana
             - name: datasources
               mountPath: /etc/grafana/provisioning/datasources
+            # T-127: dashboard provisioner + dashboard JSON 들
+            - name: dashboards-provider
+              mountPath: /etc/grafana/provisioning/dashboards
+            - name: dashboards
+              mountPath: /etc/grafana/dashboards
           readinessProbe:
             httpGet:
               path: /api/health
@@ -110,6 +142,12 @@ spec:
         - name: datasources
           configMap:
             name: grafana-datasources
+        - name: dashboards-provider
+          configMap:
+            name: grafana-dashboards-provider
+        - name: dashboards
+          configMap:
+            name: grafana-dashboards
 ---
 apiVersion: v1
 kind: Service

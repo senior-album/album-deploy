@@ -115,6 +115,7 @@ kubectl apply -f k8s/networkpolicies.yaml
 
 # 3-3. Loki / Grafana / Alloy
 kubectl apply -f k8s/loki/loki.yaml
+kubectl apply -f k8s/loki/dashboards.yaml   # T-127: dashboard ConfigMap (grafana 보다 먼저 적용해서 첫 기동 시 누락 회피)
 kubectl apply -f k8s/loki/grafana.yaml
 kubectl apply -f k8s/loki/alloy.yaml
 
@@ -180,7 +181,55 @@ T-182 Phase 2 에서 추가 — 본 PR 에서는 global 30일만.
 - NetworkPolicy 가 grafana → loki 차단: `kubectl describe networkpolicy grafana` 확인
 - Loki 가 안 떠있음: §4-1 부터 다시
 
-## 7. 관련
+## 7. T-127 — 운영 가시성 (level 라벨 + 노이즈 필터 + 대시보드)
+
+### 7-1. 변경 요약
+
+- `alloy.yaml` 의 `loki.process "parse"` stage 추가:
+  - `stage.json` — backend (T-123) JSON 라인에서 `level`, `logger` 추출
+  - `stage.labels` — `level` 만 라벨로 승격 (cardinality ≤5). `logger` 는 필드로만
+  - `stage.drop` 두 단계 — `kube-probe/` UA (frontend nginx access),
+    `\"GET /(health\|ready) ... 2\d\d` (backend uvicorn.access). 5xx probe 는 keep
+- `grafana.yaml`: dashboard provisioner ConfigMap (`grafana-dashboards-provider`)
+  + `/etc/grafana/dashboards` 마운트. Loki 데이터소스에 `uid: loki` 고정
+- `dashboards.yaml`: `senior-album-overview` 대시보드 (6 패널)
+
+### 7-2. 동작 검증
+
+```bash
+# 7-2-1. alloy 가 새 config 로 reload 됐는지
+kubectl -n senior-album rollout restart daemonset/alloy
+kubectl -n senior-album rollout status daemonset/alloy --timeout=60s
+kubectl -n senior-album logs daemonset/alloy --tail=30 | grep -iE "error|forbidden" | head -5
+# 비어있어야 OK. river syntax error 가 있으면 여기서 잡힌다.
+
+# 7-2-2. level 라벨이 발급되는지 — Grafana Explore 에서:
+#   sum by (level) (count_over_time({namespace="senior-album"} [5m]))
+# INFO / WARNING / ERROR series 가 보여야 한다 (postgres/redis/minio 라인은 level 비어 있음 → 별도 시리즈).
+
+# 7-2-3. healthcheck 노이즈가 떨어지는지 — 5분 동안:
+#   sum(count_over_time({namespace="senior-album", container="backend"} |= "/health" [5m]))
+# 0 또는 매우 작아야 한다. (5xx 응답만 통과)
+
+# 7-2-4. dashboard 등록 확인:
+kubectl -n senior-album rollout restart deployment/grafana
+kubectl -n senior-album rollout status deployment/grafana --timeout=120s
+# 브라우저: http://localhost:3000 → Dashboards → "Senior Album — 운영 가시성"
+```
+
+### 7-3. 트러블슈팅
+
+- **Alloy CrashLoopBackOff (T-127 이후)**: `kubectl -n senior-album logs daemonset/alloy`
+  맨 위 라인이 river syntax / regex compile error 일 확률 큼.
+  raw string (백틱) 안 쓰고 일반 string ("...") 으로 정규식을 박았다면 escape 가
+  꼬였을 수도 — 이 때는 `expression = ` 우측을 백틱으로 둘러싼 raw 문자열로 둘 것.
+- **대시보드가 안 뜸**: `kubectl -n senior-album logs deployment/grafana | grep -i provisioning`
+  - `grafana-dashboards-provider` / `grafana-dashboards` ConfigMap 둘 다 mount 됐는지
+  - `/etc/grafana/dashboards/*.json` 존재하는지: `kubectl -n senior-album exec deploy/grafana -- ls /etc/grafana/dashboards`
+- **데이터소스 datasource not found**: dashboard JSON 의 `datasource.uid` 가 `loki`
+  인데 datasource provisioning 에 `uid: loki` 누락이면 panel 들이 "Data source not found".
+
+## 8. 관련
 
 - `roadmap/docs/log-retention-policy.md` — retention 정책 (T-182)
 - `roadmap/docs/legal/06_breach_notification_procedure.md` — 유출 조사 시 Loki 쿼리 의존 (T-181)
