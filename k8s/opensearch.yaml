@@ -39,13 +39,28 @@ spec:
           env:
             - name: discovery.type
               value: single-node
-            - name: DISABLE_SECURITY_PLUGIN
+            # T-004c: security plugin 활성화.
+            # 컨테이너 entrypoint 가 install_demo_configuration.sh 를 실행해서
+            # self-signed cert + opensearch.yml 의 security 설정을 자동 생성한다.
+            # 그 다음 plugin 이 .opendistro_security 인덱스를 자동 초기화하면서
+            # 마운트된 internal_users.yml 의 사용자 정의 (admin + album_backend) 가
+            # cluster 에 푸시된다.
+            - name: plugins.security.allow_default_init_securityindex
               value: "true"
             - name: OPENSEARCH_JAVA_OPTS
               value: "-Xms256m -Xmx256m"
           volumeMounts:
             - name: opensearch-data
               mountPath: /usr/share/opensearch/data
+            # T-004c: opensearch-security-secret 의 internal_users.yml 만 subPath
+            # 로 한 파일 덮어쓰기 (디렉토리 통째 마운트하면 roles.yml 등 디폴트
+            # 사라짐). admin 은 backend_roles=[admin] → 디폴트 roles_mapping 의
+            # all_access 로 이어짐. album_backend 도 동일 — least-privilege role
+            # 분리는 후속 (스펙 §9 (b)/(c)).
+            - name: opensearch-security-config
+              mountPath: /usr/share/opensearch/config/opensearch-security/internal_users.yml
+              subPath: internal_users.yml
+              readOnly: true
           resources:
             requests:
               memory: "512Mi"
@@ -57,6 +72,12 @@ spec:
         - name: opensearch-data
           persistentVolumeClaim:
             claimName: opensearch-pvc
+        - name: opensearch-security-config
+          secret:
+            secretName: opensearch-security-secret
+            items:
+              - key: internal_users.yml
+                path: internal_users.yml
 ---
 apiVersion: v1
 kind: Service
