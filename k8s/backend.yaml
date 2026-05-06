@@ -38,7 +38,7 @@ spec:
         - name: ghcr-secret
       containers:
         - name: backend
-          image: ghcr.io/senior-album/album-backend:d16e49c
+          image: ghcr.io/senior-album/album-backend:b542d80
           imagePullPolicy: Always
           env:
             - name: NO_ALBUMENTATIONS_UPDATE
