@@ -19,6 +19,11 @@
 #     image 업데이트 자동화가 backend.yaml 갱신 시 본 파일은 수동 sync 가
 #     필요할 수 있다 (자동화 스크립트 후속 정비 대상).
 #
+# initContainer:
+#   k3s 임베드 kube-router 가 단명 pod 의 NetworkPolicy rule 을 propagate
+#   하기 전에 main 컨테이너가 bring-up 돼서 connection refused 가 나는 사례
+#   확인 (T-182 follow-up). 30초 안에 nc 가 통하면 그 시점에 main 시작.
+#
 # 실패 시: backoffLimit=2 + activeDeadlineSeconds=600 — 10분 안에 못 끝내면
 # abort. failedJobsHistoryLimit=5 라 최근 5회 실패 파드 보존 → 운영자가
 # `kubectl logs` 로 사후 진단 가능.
@@ -47,9 +52,30 @@ spec:
           restartPolicy: OnFailure
           imagePullSecrets:
             - name: ghcr-secret
+          initContainers:
+            - name: wait-for-postgres
+              image: busybox:1.37
+              command:
+                - sh
+                - -c
+                - |
+                  for i in $(seq 1 6); do
+                    nc -z postgres 5432 && exit 0
+                    echo "postgres not reachable yet (attempt $i/6) — sleep 5s"
+                    sleep 5
+                  done
+                  echo "postgres unreachable after 30s — abort" >&2
+                  exit 1
+              resources:
+                requests:
+                  memory: "16Mi"
+                  cpu: "10m"
+                limits:
+                  memory: "32Mi"
+                  cpu: "50m"
           containers:
             - name: birthday-reminder
-              image: ghcr.io/senior-album/album-backend:e8fd08a
+              image: ghcr.io/senior-album/album-backend:d6eb948
               imagePullPolicy: Always
               command:
                 - python
