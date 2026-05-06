@@ -1,0 +1,71 @@
+---
+# T-182 Phase 2: 보관기간 초과 row 자동 파기 cron.
+#
+# 스케줄: 매주 일요일 19:00 UTC (= 월요일 04:00 KST).
+#   - postgres-backup (매일 18:00 UTC) + 1h 차이를 두어 R2/DB I/O 겹침 회피.
+#   - 주 1회로 충분 — DELETE 영향 row 가 작고, 정책 cutoff 가 일/월 단위라
+#     매일 돌리는 의미가 적음.
+#
+# 동작 (`app/scripts/purge_expired_logs.py` 참조):
+#   refresh_tokens(만료 즉시) / photo_shares-link(30d) /
+#   photo_processing_jobs-completed,failed(60d) / notifications(90d) /
+#   photo_audit_logs(3y) / admin_audit_logs(3y) 의 cutoff 초과 row 삭제.
+#   stdout 으로 단일 JSON line summary 출력 → Loki(T-042) 가 잡아 추세 확인.
+#
+# 의존성:
+#   - backend-config + backend-secret (envFrom) — POSTGRES_* 등 backend
+#     deployment 와 동일 keyset.
+#   - backend image — backend Deployment 와 같은 sha 를 사용해 코드 일관성
+#     유지. backend.yaml 갱신 시 본 파일 image tag 도 같이 sync 필요
+#     (birthday-cron 과 동일 패턴 — 자동화는 후속 정비 대상).
+#
+# 정책 출처: `roadmap/docs/log-retention-policy.md` §2-3, §2-4, §2-8.
+#
+# 실패 시: backoffLimit=2 + activeDeadlineSeconds=600 — 10분 안에 못 끝내면
+# abort. failedJobsHistoryLimit=5 라 최근 5회 실패 파드 보존 → 운영자가
+# `kubectl logs` 로 사후 진단 가능.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backend-log-purge-cron
+  namespace: senior-album
+  labels:
+    app: backend-log-purge-cron
+spec:
+  schedule: "0 19 * * 0"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  startingDeadlineSeconds: 3600
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels:
+            app: backend-log-purge-cron
+        spec:
+          restartPolicy: OnFailure
+          imagePullSecrets:
+            - name: ghcr-secret
+          containers:
+            - name: log-purge
+              image: ghcr.io/senior-album/album-backend:0325d07
+              imagePullPolicy: Always
+              command:
+                - python
+                - -m
+                - app.scripts.purge_expired_logs
+              envFrom:
+                - configMapRef:
+                    name: backend-config
+                - secretRef:
+                    name: backend-secret
+              resources:
+                requests:
+                  memory: "256Mi"
+                  cpu: "100m"
+                limits:
+                  memory: "512Mi"
+                  cpu: "500m"
