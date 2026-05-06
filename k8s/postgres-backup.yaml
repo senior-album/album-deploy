@@ -75,7 +75,8 @@ spec:
                   chmod +x /usr/local/bin/mc
 
                   mc alias set r2 "$R2_ENDPOINT" "$R2_ACCESS_KEY" "$R2_SECRET_KEY" >/dev/null
-                  mc mb --ignore-existing "r2/$R2_BUCKET" >/dev/null
+                  # bucket 은 R2 대시보드에서 미리 생성. mc mb 는 안 부름 — object-only
+                  # 토큰이라 Access Denied (T-130 = T-043/T-044 follow-up).
 
                   # dump → R2 stream (디스크 임시 파일 없음)
                   pg_dump --no-owner --no-privileges -Fc \
