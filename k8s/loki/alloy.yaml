@@ -7,6 +7,15 @@
 # 라벨 매핑 (kubernetes pod labels → Loki labels):
 #   namespace, app (pod label), pod, container, node
 # PII redaction: backend 측 PIIRedactionFilter (T-103) 가 이미 처리. Alloy 단계에서 추가 X.
+#
+# T-127: 처리 파이프라인 추가 — 소스 → loki.process.parse → loki.write.
+#   1) JSON 라인 (backend, T-123) 에서 `level` 추출해 라벨로 승격 (cardinality
+#      ≤5 안전). `logger` 는 필드로만 (cardinality 폭발 방지).
+#   2) 노이즈 drop:
+#      - kubelet probe (UA `kube-probe/...`) → frontend nginx access 라인 제거
+#      - uvicorn.access 의 GET/HEAD /health|/ready 200 응답 → backend probe 제거
+#   비-JSON 라인 (postgres, redis, opensearch, minio 등) 은 stage.json 가
+#   조용히 통과시키므로 그대로 흐른다.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -83,7 +92,44 @@ data:
     // pod stdout 읽기 (K8s API 의 pods/log subresource 로 tail — ClusterRole 에 pods/log 필요)
     loki.source.kubernetes "pods" {
       targets    = discovery.relabel.pods.output
+      forward_to = [loki.process.parse.receiver]
+    }
+
+    // T-127: JSON parse + level 라벨 promote + 노이즈 drop
+    loki.process "parse" {
       forward_to = [loki.write.default.receiver]
+
+      // 1) backend JSON 라인에서 level / logger 추출.
+      //    비-JSON 라인은 파싱 실패해도 stage 가 조용히 넘어간다 (라인 그대로 보존).
+      stage.json {
+        expressions = {
+          level  = "level",
+          logger = "logger",
+        }
+      }
+
+      // 2) level 만 라벨로 승격. 값 ≤5 (DEBUG/INFO/WARNING/ERROR/CRITICAL) 라
+      //    cardinality 안전. logger 는 필드로만 (LogQL 의 `| json` 으로 추출).
+      stage.labels {
+        values = {
+          level = "",
+        }
+      }
+
+      // 3) 노이즈 drop — kubelet probe (frontend nginx 가 UA 를 찍어줌).
+      //    nginx access 포맷 끝에 `"kube-probe/<ver>"` 가 붙는다.
+      stage.drop {
+        expression          = "kube-probe/"
+        drop_counter_reason = "noise_kube_probe"
+      }
+
+      // 4) 노이즈 drop — backend uvicorn.access 의 health/ready probe.
+      //    JSON 한 줄 안의 escaped quote (`\"GET /health`) 를 그대로 매치한다.
+      //    raw string (백틱) 안에서는 escape 처리 X — Go regexp 가 그대로 받는다.
+      stage.drop {
+        expression          = `\\"(?:GET|HEAD) /(?:health|ready)[^\\"]*\\" 2\d\d`
+        drop_counter_reason = "noise_healthcheck"
+      }
     }
 
     // Loki push
