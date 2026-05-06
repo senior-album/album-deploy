@@ -1,0 +1,19 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: senior-album
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/senior-album/album-deploy.git
+    path: k8s
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: senior-album
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
