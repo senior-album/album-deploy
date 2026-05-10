@@ -34,7 +34,10 @@ spec:
         # 회전할 때마다 같이 올려야 함.
         # T-055: JWT rolling key 인프라 도입 — JWT_KEY_V1 / JWT_REFRESH_KEY_V1
         # envvar 매핑 추가에 맞춰 revision 갱신 (rollout 강제).
-        album.io/secret-revision: "T-055"
+        # T-055-v2-add: JWT_KEY_V2 / JWT_REFRESH_KEY_V2 SealedSecret 추가 (Phase 1)
+        # — envFrom 으로 자동 노출되지만 기존 pod 가 envvar 를 픽업 못 하므로
+        # revision 갱신해서 rollout 강제. 활성 kid 전환은 Phase 2 에서.
+        album.io/secret-revision: "T-055-v2-add"
     spec:
       imagePullSecrets:
         - name: ghcr-secret
