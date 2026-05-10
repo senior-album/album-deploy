@@ -75,7 +75,7 @@ spec:
                   cpu: "50m"
           containers:
             - name: birthday-reminder
-              image: ghcr.io/senior-album/album-backend:d6eb948
+              image: ghcr.io/senior-album/album-backend:8189762
               imagePullPolicy: Always
               command:
                 - python
