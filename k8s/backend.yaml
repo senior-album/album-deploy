@@ -37,7 +37,10 @@ spec:
         # T-055-v2-add: JWT_KEY_V2 / JWT_REFRESH_KEY_V2 SealedSecret 추가 (Phase 1)
         # — envFrom 으로 자동 노출되지만 기존 pod 가 envvar 를 픽업 못 하므로
         # revision 갱신해서 rollout 강제. 활성 kid 전환은 Phase 2 에서.
-        album.io/secret-revision: "T-055-v2-add"
+        # T-055-v2-active: 활성 kid 를 v1 → v2 로 전환 (Phase 2). 신규 발급 토큰은
+        # kid=v2 헤더로 서명되고, 옛 v1 / legacy 토큰은 keyset 에 둘 다 살아있어
+        # 검증 그대로 통과 — 강제 로그아웃 없음. 14일 grace 후 Phase 4 에서 제거.
+        album.io/secret-revision: "T-055-v2-active"
     spec:
       imagePullSecrets:
         - name: ghcr-secret
@@ -66,10 +69,11 @@ spec:
                 secretKeyRef:
                   name: backend-secret
                   key: JWT_REFRESH_SECRET
+            # T-055-v2-active (Phase 2): 활성 kid v1 → v2.
             - name: JWT_ACTIVE_KID
-              value: "v1"
+              value: "v2"
             - name: JWT_REFRESH_ACTIVE_KID
-              value: "v1"
+              value: "v2"
           ports:
             - containerPort: 8000
           envFrom:
