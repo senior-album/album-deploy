@@ -44,6 +44,35 @@ spec:
     spec:
       imagePullSecrets:
         - name: ghcr-secret
+      # T-316: rollout 시 첫 컨테이너가 alembic upgrade / asyncpg connect 단계
+      # 에서 postgres 5432 에 닿지 못해 죽고 재시작하는 race (roadmap#229).
+      # k3s kube-router NPC 가 새 pod 의 NetworkPolicy rule 을 propagate 하기
+      # 전 main 컨테이너가 bring-up 돼서 ConnectionRefused → exit. cron 들
+      # (`backend-log-purge-cron.yaml`) 에 이미 적용된 패턴 그대로 복제 — TCP
+      # 가 통할 때까지 단순 nc retry. backend Deployment 는 `app: backend`
+      # 라벨을 그대로 init 단계에서도 들고 있어 `postgres` NetworkPolicy
+      # ingress 매칭에 추가 변경 불필요.
+      initContainers:
+        - name: wait-for-postgres
+          image: busybox:1.37
+          command:
+            - sh
+            - -c
+            - |
+              for i in $(seq 1 6); do
+                nc -z postgres 5432 && exit 0
+                echo "postgres not reachable yet (attempt $i/6) — sleep 5s"
+                sleep 5
+              done
+              echo "postgres unreachable after 30s — abort" >&2
+              exit 1
+          resources:
+            requests:
+              memory: "16Mi"
+              cpu: "10m"
+            limits:
+              memory: "32Mi"
+              cpu: "50m"
       containers:
         - name: backend
           image: ghcr.io/senior-album/album-backend:a4c0170
