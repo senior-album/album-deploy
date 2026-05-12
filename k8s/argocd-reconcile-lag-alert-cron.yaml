@@ -1,0 +1,205 @@
+---
+# T-315 (roadmap#227): ArgoCD reconciledAt lag Discord 알람.
+#
+# 배경 — argocd-repo-server git polling 무음 정지 사고가 4일 새 2회:
+#   - 2026-05-06: frontend bundle 옛 버전 계속 서빙 → repo-server hard refresh
+#     로 해소 (memory `argocd_repo_server_poll_stuck.md`)
+#   - 2026-05-10: T-303 backend SHA bump 후 `reconciledAt` 55분 stale → pod 가
+#     옛 image 그대로 서빙 → 사용자가 캘린더 500 재보고
+#
+# 두 번 다 Application 은 Synced/Healthy 거짓 보고. T-129 argocd-notifications
+# (on-sync-failed / on-out-of-sync / on-health-degraded 등) 는 sync 결과·
+# revision drift 기반이라 "reconciledAt 자체가 stale" 시나리오를 못 잡음.
+#
+# 동작:
+#   - 5분 주기로 argocd ns 의 모든 Application 의 .status.reconciledAt 조회
+#   - now() - reconciledAt = lag 계산
+#   - lag >= 30 min → 🔴 Critical (repo-server 재시작 권고 포함)
+#   - lag >= 10 min → 🟠 Warn
+#   - 임계 미만이면 무알람 (정상 polling 주기 ~3 분)
+#
+# 임계치 근거: roadmap#227 body. 10분 = autosync interval (3분) × 3 + 여유 →
+# 일시 spike 무시 가능 하한. 30분 = repo-server poll 정지 사고 사례 평균치.
+#
+# Discord 웹훅: senior-album/backend-secret 의 DISCORD_OPS_WEBHOOK_URL 재사용.
+# T-041 (Uptime Kuma + photo_worker 영구 실패) / T-129 (argocd-notifications)
+# 와 같은 채널. 노이즈가 보고되면 별도 ops-alerts 채널로 분리 고려.
+#
+# RBAC: cross-namespace minimal. ServiceAccount 는 senior-album ns,
+# Role + RoleBinding 은 argocd ns. 권한은 applications.argoproj.io get/list 만.
+#
+# Image: alpine/k8s 는 kubectl + jq + curl + sh 가 한 이미지에 들어있어 별도
+# 빌드 불요. backend image 와 분리돼 있어 T-309 의 cron image SHA stale 사고
+# 패턴에서 자유로움 (코드 의존성 없음 — kubectl + jq 만).
+#
+# 실패 시: backoffLimit=0, activeDeadlineSeconds=60 — 1분 안에 못 끝내면 abort.
+# failedJobsHistoryLimit=5 로 사후 진단 가능. concurrencyPolicy=Forbid 로 5분
+# 주기 겹침 방지 (lag 조회는 정상이면 수 초).
+#
+# 의존성:
+#   - argocd-notifications-controller (T-129) 가 이미 떠 있어야 보완 알람의 의미
+#     가 큼 — 기존 알람이 sync 라이프사이클을, 본 cron 이 poll stuck 을 커버
+#   - backend-secret 의 DISCORD_OPS_WEBHOOK_URL 이 채워져 있어야 함 (빈 값이면
+#     스크립트가 silent skip)
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: argocd-reconcile-lag-alert
+  namespace: senior-album
+
+---
+# argocd ns 안의 Application CR 만 읽을 수 있는 Role. minimal scope.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argocd-reconcile-lag-alert
+  namespace: argocd
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["get", "list"]
+
+---
+# senior-album ns 의 SA 를 argocd ns 의 Role 에 바인딩.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argocd-reconcile-lag-alert
+  namespace: argocd
+subjects:
+  - kind: ServiceAccount
+    name: argocd-reconcile-lag-alert
+    namespace: senior-album
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: argocd-reconcile-lag-alert
+
+---
+# 스크립트는 ConfigMap mount. defaultMode=0555 로 실행 가능. ConfigMap 변경 시
+# kubelet 가 mount 를 갱신하므로 image rebuild 불필요.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-reconcile-lag-alert
+  namespace: senior-album
+data:
+  check.sh: |
+    #!/bin/sh
+    set -eu
+
+    WARN_MIN="${WARN_MIN:-10}"
+    CRIT_MIN="${CRIT_MIN:-30}"
+    WEBHOOK_URL="${DISCORD_OPS_WEBHOOK_URL:-}"
+
+    if [ -z "${WEBHOOK_URL}" ]; then
+      echo "DISCORD_OPS_WEBHOOK_URL empty — skip" >&2
+      exit 0
+    fi
+
+    now=$(date -u +%s)
+
+    # kubectl JSON → "name\treconciledAt\tlag_min" lines.
+    # reconciledAt 은 RFC3339 (e.g. "2026-05-12T13:24:06Z") 이지만 ArgoCD 가
+    # 가끔 fractional seconds 를 붙이거나 "+00:00" 오프셋을 쓸 수 있어 jq
+    # fromdateiso8601 에 들어가기 전 정규화: ".123" → 제거, "+HH:MM" → "Z".
+    kubectl -n argocd get applications -o json \
+      | jq -r --argjson now "$now" '
+          .items[]
+          | select(.status.reconciledAt)
+          | .metadata.name as $name
+          | .status.reconciledAt as $ra
+          | ($ra | sub("\\.[0-9]+"; "") | sub("[+-][0-9]{2}:[0-9]{2}$"; "Z") | fromdateiso8601) as $ts
+          | "\($name)\t\($ra)\t\((($now - $ts) / 60 | floor))"
+        ' > /tmp/apps.tsv
+
+    # POSIX while-read 가 마지막 줄에 newline 없으면 마지막 항목을 누락하는 경우가
+    # 있어 [ -n "$name" ] 으로 가드.
+    while IFS="$(printf '\t')" read -r name reconciled_at lag_min || [ -n "${name:-}" ]; do
+      [ -z "${name:-}" ] && continue
+      echo "${name}: reconciledAt=${reconciled_at} lag_min=${lag_min}"
+
+      if [ "${lag_min}" -ge "${CRIT_MIN}" ]; then
+        severity="🔴 Critical"
+        note=" — repo-server polling 정지 의심. \`kubectl -n argocd rollout restart deploy/argocd-repo-server\` 권고."
+      elif [ "${lag_min}" -ge "${WARN_MIN}" ]; then
+        severity="🟠 Warn"
+        note=""
+      else
+        continue
+      fi
+
+      content=$(printf '%s ArgoCD reconciledAt lag — **%s**\nlag=`%s min` · reconciledAt=`%s`%s' \
+        "${severity}" "${name}" "${lag_min}" "${reconciled_at}" "${note}")
+
+      # jq -Rs 로 stdin 전체를 string 으로 받아 안전하게 JSON escape.
+      payload=$(printf '%s' "${content}" | jq -Rs '{username: "ArgoCD T-315", content: .}')
+
+      http_code=$(curl -sS -o /tmp/resp.txt -w "%{http_code}" -X POST \
+        -H "Content-Type: application/json" \
+        --data-binary "${payload}" "${WEBHOOK_URL}" || echo "000")
+
+      if [ "${http_code}" = "204" ] || [ "${http_code}" = "200" ]; then
+        echo "${name}: Discord alert sent (${severity})"
+      else
+        echo "${name}: Discord POST failed http=${http_code} body=$(cat /tmp/resp.txt 2>/dev/null || true)" >&2
+      fi
+    done < /tmp/apps.tsv
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: argocd-reconcile-lag-alert
+  namespace: senior-album
+  labels:
+    app: argocd-reconcile-lag-alert
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 5
+  startingDeadlineSeconds: 300
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 60
+      template:
+        metadata:
+          labels:
+            app: argocd-reconcile-lag-alert
+        spec:
+          restartPolicy: Never
+          serviceAccountName: argocd-reconcile-lag-alert
+          containers:
+            - name: check
+              image: alpine/k8s:1.30.5
+              imagePullPolicy: IfNotPresent
+              command: ["sh", "/scripts/check.sh"]
+              env:
+                - name: DISCORD_OPS_WEBHOOK_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: backend-secret
+                      key: DISCORD_OPS_WEBHOOK_URL
+                - name: WARN_MIN
+                  value: "10"
+                - name: CRIT_MIN
+                  value: "30"
+              volumeMounts:
+                - name: script
+                  mountPath: /scripts
+                  readOnly: true
+              resources:
+                requests:
+                  memory: "32Mi"
+                  cpu: "20m"
+                limits:
+                  memory: "128Mi"
+                  cpu: "100m"
+          volumes:
+            - name: script
+              configMap:
+                name: argocd-reconcile-lag-alert
+                defaultMode: 0555

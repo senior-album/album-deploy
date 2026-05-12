@@ -513,6 +513,31 @@ spec:
           port: 9000
 
 ---
+# T-315 — argocd-reconcile-lag-alert: kube-apiserver (applications.argoproj.io
+#         조회) + Discord webhook (외부 443). alloy 와 동일 패턴 — kube-apiserver
+#         의 ClusterIP 가 보통 10.x 라 RFC1918 except 에 잡히므로 ipBlock 을
+#         except 없이 풀어 443/6443 허용.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: argocd-reconcile-lag-alert
+  namespace: senior-album
+spec:
+  podSelector:
+    matchLabels:
+      app: argocd-reconcile-lag-alert
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+
+---
 # T-042 — loki: alloy + grafana 에서 :3100 (push + query).
 #                egress: minio:9000 (chunks/index 저장).
 apiVersion: networking.k8s.io/v1
