@@ -78,7 +78,7 @@ spec:
                   cpu: "50m"
           containers:
             - name: log-purge
-              image: ghcr.io/senior-album/album-backend:a4c0170
+              image: ghcr.io/senior-album/album-backend:a4fad19
               imagePullPolicy: Always
               command:
                 - python
