@@ -1,0 +1,155 @@
+---
+# T-122: Tempo single binary mode (distributor + ingester + querier + compactor 한 프로세스).
+#
+# 모드: single binary — k3s 단일 노드 + 베타 트래픽 (~30 사용자) 라 microservices
+#       분리 ROI 부족. Loki 와 동일 패턴.
+# 스토리지: 로컬 PVC 5Gi (chunks/index 모두 local backend). MinIO S3 도 가능하지만
+#           phase1 단순화 — trace 1건 ~5KB × 1k req/일 × 7일 = ~35MB 로 충분.
+#           트래픽 10배 시 S3 backend 로 전환.
+# Retention: 168h (7일). Loki 30일보다 짧게 — trace 는 사고 진단용으로 단기.
+# 의존성: 없음 (로컬 PVC만, in-cluster 만 노출).
+# Receiver: OTLP gRPC :4317, HTTP :4318 — backend 가 직접 보내는 게 아니라
+#           OTel Collector 가 batch/queue 후 forward. 따라서 NetworkPolicy 도
+#           collector 만 ingress 허용.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tempo-pvc
+  namespace: senior-album
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tempo-config
+  namespace: senior-album
+data:
+  tempo.yaml: |
+    server:
+      http_listen_port: 3200
+      grpc_listen_port: 9096
+      log_level: info
+
+    distributor:
+      receivers:
+        otlp:
+          protocols:
+            grpc:
+              endpoint: 0.0.0.0:4317
+            http:
+              endpoint: 0.0.0.0:4318
+
+    ingester:
+      max_block_duration: 5m
+      trace_idle_period: 10s
+
+    compactor:
+      compaction:
+        block_retention: 168h         # 7일
+        compacted_block_retention: 1h
+
+    storage:
+      trace:
+        backend: local
+        local:
+          path: /tempo/blocks
+        wal:
+          path: /tempo/wal
+
+    querier:
+      max_concurrent_queries: 4
+
+    metrics_generator_enabled: false
+
+    usage_report:
+      reporting_enabled: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tempo
+  namespace: senior-album
+  labels:
+    app: tempo
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate              # PVC ReadWriteOnce — 두 pod 동시 마운트 불가
+  selector:
+    matchLabels:
+      app: tempo
+  template:
+    metadata:
+      labels:
+        app: tempo
+    spec:
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      containers:
+        - name: tempo
+          image: grafana/tempo:2.6.1
+          args:
+            - -config.file=/etc/tempo/tempo.yaml
+          ports:
+            - containerPort: 3200
+              name: http
+            - containerPort: 4317
+              name: otlp-grpc
+            - containerPort: 4318
+              name: otlp-http
+          volumeMounts:
+            - name: config
+              mountPath: /etc/tempo
+            - name: data
+              mountPath: /tempo
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 3200
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: 3200
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          resources:
+            requests:
+              memory: "192Mi"
+              cpu: "50m"
+            limits:
+              memory: "512Mi"
+              cpu: "300m"
+      volumes:
+        - name: config
+          configMap:
+            name: tempo-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: tempo-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tempo
+  namespace: senior-album
+spec:
+  selector:
+    app: tempo
+  ports:
+    - name: http
+      port: 3200
+      targetPort: 3200
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
