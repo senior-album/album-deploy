@@ -273,8 +273,9 @@ spec:
           port: 9000
 
 ---
-# cloudflared: egress to frontend:80 + minio:9000 + Cloudflare tunnel (7844/UDP, 443/TCP).
+# cloudflared: egress to frontend:80 + minio:9000 + argocd-server (cross-ns) + Cloudflare tunnel (7844/UDP, 443/TCP).
 # minio 는 storage.thekim123.info 서브도메인이 MinIO 로 직접 라우팅 (presigned URL 다운로드).
+# argocd 는 argocd ns 의 argocd-server 로 cross-namespace egress (T-317).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -300,6 +301,21 @@ spec:
       ports:
         - protocol: TCP
           port: 9000
+    # T-317: argocd.thekim123.info 라우트 → argocd-server.argocd.svc:80 → pod :8080.
+    # NetworkPolicy `ports` 는 Service ClusterIP DNAT 후의 pod 실제 포트 기준이라
+    # 8080 으로 적는다. namespaceSelector 의 라벨 `kubernetes.io/metadata.name`
+    # 은 k8s 1.21+ 가 모든 ns 에 자동으로 부여하므로 별도 설정 불필요.
+    # podSelector 의 라벨은 argocd-server pod 의 `app.kubernetes.io/name` 과 매치.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: argocd
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: argocd-server
+      ports:
+        - protocol: TCP
+          port: 8080
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
