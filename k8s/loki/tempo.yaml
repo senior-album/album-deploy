@@ -63,7 +63,9 @@ data:
     querier:
       max_concurrent_queries: 4
 
-    metrics_generator_enabled: false
+    # metrics_generator 섹션을 두지 않으면 default 로 비활성 — phase1 은 traces 만.
+    # (Tempo 2.6.1 schema 에 `metrics_generator_enabled` 라는 top-level 키는
+    # 존재하지 않아 unmarshal error 로 pod CrashLoopBackOff 가 났었음.)
 
     usage_report:
       reporting_enabled: false
