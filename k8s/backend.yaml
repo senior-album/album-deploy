@@ -40,7 +40,8 @@ spec:
         # T-055-v2-active: 활성 kid 를 v1 → v2 로 전환 (Phase 2). 신규 발급 토큰은
         # kid=v2 헤더로 서명되고, 옛 v1 / legacy 토큰은 keyset 에 둘 다 살아있어
         # 검증 그대로 통과 — 강제 로그아웃 없음. 14일 grace 후 Phase 4 에서 제거.
-        album.io/secret-revision: "T-055-v2-active"
+        # T-122: OTEL_EXPORTER_OTLP_ENDPOINT 등 env 추가 — backend pod 재시작 강제.
+        album.io/secret-revision: "T-122-otel-traces"
     spec:
       imagePullSecrets:
         - name: ghcr-secret
@@ -103,6 +104,18 @@ spec:
               value: "v2"
             - name: JWT_REFRESH_ACTIVE_KID
               value: "v2"
+            # T-122: OpenTelemetry traces — OTel Collector (otel-collector:4317)
+            # 로 OTLP gRPC 송신. backend SDK 는 OTEL_EXPORTER_OTLP_ENDPOINT 가
+            # 비어있을 때 silent no-op 이라 본 env 가 도입돼야 비로소 trace 가
+            # 흐른다. service.name 은 Tempo / Grafana 에서 backend 식별 키.
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otel-collector:4317"
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: "grpc"
+            - name: OTEL_SERVICE_NAME
+              value: "album-backend"
+            - name: OTEL_TRACES_EXPORTER
+              value: "otlp"
           ports:
             - containerPort: 8000
           envFrom:

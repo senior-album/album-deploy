@@ -1,0 +1,121 @@
+---
+# T-122: OpenTelemetry Collector (gateway 역할).
+#
+# 왜 backend → tempo 직접 연결이 아니라 collector 를 한 단계 끼우나:
+# - backend pod 가 죽거나 재시작될 때 in-process queue 만으로는 마지막 span
+#   유실 위험. Collector 의 batch + queue 가 retry/buffer 역할.
+# - 향후 sampling / attribute scrubbing / 다른 backend (Jaeger, Honeycomb 등)
+#   추가 시 collector config 만 바꾸면 됨 (backend 재배포 불필요).
+# - 5개 instrumentation 패키지가 같은 endpoint 로 push 하는 게 단순.
+#
+# stateless — replicas 1 로 시작. 트래픽 늘면 HPA 또는 replicas 증설.
+# in-cluster 만 노출. NetworkPolicy: backend 만 ingress, tempo 만 egress.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: senior-album
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 256
+        spike_limit_mib: 64
+      batch:
+        timeout: 1s
+        send_batch_size: 1024
+        send_batch_max_size: 2048
+
+    exporters:
+      otlp/tempo:
+        endpoint: tempo:4317
+        tls:
+          insecure: true
+
+    service:
+      telemetry:
+        logs:
+          level: info
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [otlp/tempo]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: senior-album
+  labels:
+    app: otel-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+    spec:
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.110.0
+          args:
+            - --config=/etc/otel/config.yaml
+          ports:
+            - containerPort: 4317
+              name: otlp-grpc
+            - containerPort: 4318
+              name: otlp-http
+            - containerPort: 13133
+              name: health
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otel
+          # Collector contrib 는 health_check extension 을 default 미설정 시
+          # 13133 이 안 열림. 본 config 도 extension 안 켜서 probe 는 startup
+          # 그레이스만 두고 생략 — pod readiness 는 deployment-level reachability
+          # (4317 connect) 로 갈음. backend 가 connect 못 하면 BatchSpanProcessor
+          # 가 silent drop, 응답성 영향 X.
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "50m"
+            limits:
+              memory: "384Mi"
+              cpu: "300m"
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: senior-album
+spec:
+  selector:
+    app: otel-collector
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318

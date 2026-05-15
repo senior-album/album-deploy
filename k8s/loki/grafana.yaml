@@ -37,6 +37,40 @@ data:
         jsonData:
           maxLines: 1000
           timeout: 60
+          # T-122: Loki 로그 라인의 `trace_id` 필드를 Tempo trace 로 점프.
+          # backend 의 LoggingInstrumentor 가 모든 로그에 trace_id 를 주입하므로
+          # log → trace 양방향 네비게이션이 한 번의 클릭으로 완성된다.
+          derivedFields:
+            - name: trace_id
+              matcherRegex: "\"trace_id\":\\s*\"([a-f0-9]+)\""
+              datasourceUid: tempo
+              url: "$${__value.raw}"
+              urlDisplayLabel: "Tempo 에서 보기"
+  tempo.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Tempo
+        # T-122: uid 고정 — Loki derivedFields 가 본 uid 를 참조해서 라우팅.
+        uid: tempo
+        type: tempo
+        access: proxy
+        url: http://tempo:3200
+        jsonData:
+          # span 한 개 클릭 시 같은 trace_id 를 가진 Loki 로그 줄을 사이드 패널에
+          # 띄움 — 한 요청의 trace + 로그 컨텍스트를 한 화면에서 본다.
+          tracesToLogsV2:
+            datasourceUid: loki
+            spanStartTimeShift: -1m
+            spanEndTimeShift: 1m
+            filterByTraceID: true
+            customQuery: true
+            query: '{namespace="senior-album"} |= "$${__trace.traceId}"'
+          serviceMap:
+            datasourceUid: ""
+          search:
+            hide: false
+          nodeGraph:
+            enabled: true
 ---
 # T-127: dashboard provisioning provider — /etc/grafana/dashboards 의
 # JSON 파일들을 자동 로드. ConfigMap (`grafana-dashboards`) 한 개에 dashboard
@@ -79,6 +113,12 @@ spec:
     metadata:
       labels:
         app: grafana
+      annotations:
+        # T-122: grafana-datasources ConfigMap 에 Tempo datasource 추가됨 (provisioning
+        # 은 grafana 기동 시 한 번만 읽힘). ArgoCD sync 가 ConfigMap 만 갱신하고
+        # pod 재기동 안 하므로 본 annotation 으로 pod template 해시를 변경 → rollout 강제.
+        # 이후 datasource 가 또 변경될 때 같이 올린다 (Loki secret 회전 패턴과 동일).
+        album.io/datasources-revision: "T-122-tempo"
     spec:
       securityContext:
         runAsUser: 472
