@@ -56,9 +56,9 @@ data:
       trace:
         backend: local
         local:
-          path: /tempo/blocks
+          path: /var/tempo/blocks
         wal:
-          path: /tempo/wal
+          path: /var/tempo/wal
 
     querier:
       max_concurrent_queries: 4
@@ -106,8 +106,13 @@ spec:
           volumeMounts:
             - name: config
               mountPath: /etc/tempo
+            # T-122 fix: Tempo 공식 이미지의 ENTRYPOINT 가 `/tempo` 실행 binary 라
+            # mountPath 를 `/tempo` 로 잡으면 PVC mount 가 binary 파일을 덮으려
+            # 시도해 "not a directory" 에러로 RunContainerError. `/var/tempo` 로
+            # 옮겨 충돌 회피. ConfigMap 의 storage.trace.local/wal.path 도 같이
+            # `/var/tempo/...` 로 변경.
             - name: data
-              mountPath: /tempo
+              mountPath: /var/tempo
           readinessProbe:
             httpGet:
               path: /ready
