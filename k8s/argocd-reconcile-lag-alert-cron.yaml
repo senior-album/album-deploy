@@ -58,7 +58,7 @@ metadata:
 rules:
   - apiGroups: ["argoproj.io"]
     resources: ["applications"]
-    verbs: ["get", "list"]
+    verbs: ["get", "list", "patch"]
 
 ---
 # senior-album ns 의 SA 를 argocd ns 의 Role 에 바인딩.
@@ -122,12 +122,23 @@ data:
 
       if [ "${lag_min}" -ge "${CRIT_MIN}" ]; then
         severity="🔴 Critical"
-        note=" — repo-server polling 정지 의심. \`kubectl -n argocd rollout restart deploy/argocd-repo-server\` 권고."
+        note=" — informer/timer 정지 의심 ([argo-cd#27192](https://github.com/argoproj/argo-cd/issues/27192)). \`kubectl -n argocd rollout restart statefulset/argocd-application-controller\` 검토."
       elif [ "${lag_min}" -ge "${WARN_MIN}" ]; then
         severity="🟠 Warn"
         note=""
       else
         continue
+      fi
+
+      # argo-cd#27192 회피 — annotate 로 informer cache event 발사해 reconcile 큐에
+      # 강제 enqueue. WARN 이상 lag 인 모든 Application 에 적용 (CRIT 도 포함, 조기
+      # 회복 시도). syncPolicy.automated 가 켜진 Application 은 reconcile 후 drift
+      # 발견 시 auto-sync 까지 트리거되므로 실효는 "자가 회복".
+      if kubectl -n argocd annotate application "${name}" \
+           argocd.argoproj.io/refresh=normal --overwrite >/dev/null 2>&1; then
+        note="${note} (auto-refresh attempted)"
+      else
+        note="${note} (auto-refresh failed — RBAC?)"
       fi
 
       content=$(printf '%s ArgoCD reconciledAt lag — **%s**\nlag=`%s min` · reconciledAt=`%s`%s' \
