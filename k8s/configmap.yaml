@@ -32,10 +32,12 @@ data:
   OPENSEARCH_HOST: "opensearch"
   OPENSEARCH_PORT: "9200"
 
-  # CORS
-  # ⚠️ T-326: 라이브 값이 아직 placeholder 다 (실 도메인 thekim123.info 누락).
-  # nginx 동일 출처라 현재는 안 터지지만 잠재 misconfig — 별도 후속에서 교체 검토.
-  ALLOWED_ORIGINS: '["https://your-domain.com","http://localhost:5173"]'
+  # CORS (main.py 의 CORSMiddleware allow_origins 로 주입, allow_credentials=True)
+  # T-326: 라이브에 남아있던 placeholder("your-domain.com") 를 실 운영 출처로 교정.
+  # album.thekim123.info = 운영 프론트 출처, localhost:5173 = 로컬 개발.
+  # 현재 프론트/API 가 동일 출처(상대경로 /api)라 정상 흐름엔 CORS 가 안 걸리지만,
+  # 다른 출처 클라이언트가 생기면 이 목록이 게이트가 된다.
+  ALLOWED_ORIGINS: '["https://album.thekim123.info","http://localhost:5173"]'
 
   # MinIO (k8s 서비스명 기준)
   MINIO_ENDPOINT: "minio:9000"
@@ -44,7 +46,13 @@ data:
   MINIO_EXTERNAL_ENDPOINT: "https://storage.thekim123.info"
 
   # 외부 URL
-  FRONTEND_URL: "https://thekim123.info"
+  # T-326: FRONTEND_URL 은 backend 가 나가는 절대 링크(비밀번호 재설정·보호자 초대·
+  # 사진 공유 — auth.py / invitations.py / photos.py)를 만들 때 쓰인다. 운영 프론트
+  # 호스트가 album.thekim123.info 라 apex 였던 값을 교정. 요청 경로엔 안 쓰여 일반
+  # 브라우징엔 영향 없으나, 위 링크 흐름이 올바른 호스트로 나가게 하려면 필요.
+  FRONTEND_URL: "https://album.thekim123.info"
+  # API_BASE_URL 은 backend app/ 코드에서 참조되지 않음(사실상 dead). 라이브 값
+  # 유지 — 프론트 빌드/문서용일 수 있어 임의 변경은 보류.
   API_BASE_URL: "https://thekim123.info/api"
 
   # 공유/보안
