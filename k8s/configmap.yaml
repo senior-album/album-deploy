@@ -52,9 +52,11 @@ data:
   LOGIN_MAX_ATTEMPTS: "5"
   LOGIN_LOCKOUT_MINUTES: "15"
   UPLOAD_DIR: "/app/uploads"
-  # ⚠️ T-326: 라이브 값이 "create". Alembic 이 스키마를 관리하는데 DDL auto-create
-  # 가 켜져 있음 — 위험 신호. 동작 영향 확인 후 별도 후속에서 "none" 전환 검토.
-  DDL_AUTO: "create"
+  # T-326: 라이브에 있던 DDL_AUTO="create" 는 dead key 라 제거. backend (배포
+  # 이미지 35b73fc) 는 Alembic Phase 2 에서 DDL_AUTO 처리를 제거했고 Settings 의
+  # extra="ignore" 로 무시한다 — create_all 호출 없음, 스키마는 `alembic upgrade
+  # head` (Dockerfile CMD) 전담. ArgoCD sync 시 라이브 cm 에서도 이 키가 사라진다
+  # (배포 이미지가 안 읽으므로 동작 영향 없음).
 
   # 카카오 OAuth
   KAKAO_REDIRECT_URI: "https://album.thekim123.info/auth/kakao/callback"
