@@ -1,0 +1,39 @@
+# T-326: cloudflared 터널 Deployment 를 git 으로 승격.
+# 터널 토큰(TUNNEL_TOKEN)은 sealed/cloudflared-secret.yaml (SealedSecret) 에서
+# 주입되므로 본 파일엔 비밀이 없다. 과거 .gitignore 에 묶여 있었으나 sealed
+# 마이그 이후로는 out-of-band 로 둘 이유가 없어 ArgoCD 관리 대상으로 편입.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudflared
+  namespace: senior-album
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cloudflared
+  template:
+    metadata:
+      labels:
+        app: cloudflared
+    spec:
+      containers:
+        - name: cloudflared
+          image: cloudflare/cloudflared:latest
+          args:
+            - tunnel
+            - --no-autoupdate
+            - run
+          env:
+            - name: TUNNEL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: cloudflared-secret
+                  key: TUNNEL_TOKEN
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "100m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
